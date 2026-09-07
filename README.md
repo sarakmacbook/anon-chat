@@ -29,10 +29,11 @@ curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install
 
 The installer will:
 
-1. Install Docker if it's missing (Ubuntu/Debian, RHEL/Rocky/Alma, Fedora, Arch, Alpine)
-2. Clone this repo to `~/anon-chat` (or update an existing install)
-3. Build the image and start the `anon-chat` container with data in `~/anon-chat-data`
-4. Verify the app is answering, then print your URL (usually `http://YOUR_SERVER_IP:3000`)
+1. Ask which public port to use (press Enter for `3000`)
+2. Install Docker if it's missing (Ubuntu/Debian, RHEL/Rocky/Alma, Fedora, Arch, Alpine)
+3. Clone this repo to `~/anon-chat` (or update an existing install)
+4. Build the image and start the `anon-chat` container with data in `~/anon-chat-data`
+5. Verify the app is answering, then print your URL (usually `http://YOUR_SERVER_IP:3000`)
 
 **Updating later?** Run the exact same command — it pulls the latest code and rebuilds.
 
@@ -40,8 +41,8 @@ The installer will:
 
 ```bash
 # Data elsewhere, port 8080, and your own #Private password:
-ANON_CHAT_DATA=~/chat-data ANON_CHAT_PORT=8080 PRIVATE_PASSWORD='my-secret' \
-  curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install.sh | \
+  ANON_CHAT_DATA=~/chat-data ANON_CHAT_PORT=8080 PRIVATE_PASSWORD='my-secret' bash
 ```
 
 | Variable | Default | Meaning |
@@ -49,7 +50,7 @@ ANON_CHAT_DATA=~/chat-data ANON_CHAT_PORT=8080 PRIVATE_PASSWORD='my-secret' \
 | `ANON_CHAT_REPO_URL` | `https://github.com/sarakmacbook/anon-chat.git` | Git URL to install from |
 | `ANON_CHAT_DIR` | `~/anon-chat` | Where the app source is cloned |
 | `ANON_CHAT_DATA` | `~/anon-chat-data` | Where messages + uploads are stored (**back this up**) |
-| `ANON_CHAT_PORT` | `3000` | Public TCP port |
+| `ANON_CHAT_PORT` | prompted (`3000`) | Public TCP port; set this to skip the prompt |
 | `PRIVATE_PASSWORD` | built-in password | Password for #Private — **set this before putting the server on the internet** |
 
 ## 🐳 Docker (manual)
