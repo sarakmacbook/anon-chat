@@ -30,7 +30,7 @@ Environment overrides (all optional):
   ANON_CHAT_REPO_URL   git URL to install from   (default: https://github.com/sarakmacbook/anon-chat.git)
   ANON_CHAT_DIR        install folder            (default: $HOME/anon-chat)
   ANON_CHAT_DATA       data folder               (default: $HOME/anon-chat-data)
-  ANON_CHAT_PORT       public TCP port           (installer asks; default: 3000)
+  ANON_CHAT_PORT       public TCP port           (installer asks; default: previous port on updates, else 3000)
   PRIVATE_PASSWORD     #Private room password    (default: built-in password)
 EOF
 }
@@ -54,21 +54,65 @@ valid_port() {
   [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
-# Read from the controlling terminal so this also works with `curl ... | bash`.
-# ANON_CHAT_PORT remains available for unattended installations.
-if [ -z "${ANON_CHAT_PORT:-}" ] && [ -r /dev/tty ]; then
-  while true; do
-    if ! read -rp "Public port [${HOST_PORT}]: " answer </dev/tty; then
-      echo "⚠️  No interactive terminal available; using port ${HOST_PORT}."
-      break
-    fi
-    candidate="${answer:-$HOST_PORT}"
-    if valid_port "$candidate"; then
+# Is something already listening on this port? (ss if present, else bash's /dev/tcp)
+port_in_use() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${1}$"
+  elif (exec 3<>"/dev/tcp/127.0.0.1/${1}") 2>/dev/null; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# On updates, default to the port the previous install used (so pressing
+# Enter doesn't silently move the app back to 3000).
+PREV_PORT=""
+if [ -r "$APP_DIR/docker-compose.deploy.yml" ]; then
+  PREV_PORT="$(grep -oE '[0-9]+:3000' "$APP_DIR/docker-compose.deploy.yml" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+  valid_port "$PREV_PORT" || PREV_PORT=""
+fi
+if [ -z "${ANON_CHAT_PORT:-}" ] && [ -n "$PREV_PORT" ]; then
+  HOST_PORT="$PREV_PORT"
+fi
+
+# Where can we ask the user? /dev/tty works even with `curl ... | bash`;
+# plain stdin works when there's no controlling terminal but stdin is a terminal.
+# (Probe /dev/tty in a subshell so a failed open can't print a bash error.)
+ASK_TTY=""
+if (exec 3<>/dev/tty) 2>/dev/null; then
+  ASK_TTY="tty"
+elif [ -t 0 ]; then
+  ASK_TTY="stdin"
+fi
+
+# Ask for the port (ANON_CHAT_PORT skips the prompt for unattended installs).
+if [ -z "${ANON_CHAT_PORT:-}" ]; then
+  if [ -z "$ASK_TTY" ]; then
+    echo "ℹ️  No interactive terminal — using port ${HOST_PORT} (set ANON_CHAT_PORT to override)."
+  else
+    while true; do
+      ANSWER=""
+      label="Public port"
+      [ -n "$PREV_PORT" ] && label="Public port (current install: ${PREV_PORT})"
+      if [ "$ASK_TTY" = "tty" ]; then
+        read -rp "${label} [${HOST_PORT}]: " ANSWER </dev/tty || ANSWER=""
+      else
+        read -rp "${label} [${HOST_PORT}]: " ANSWER || ANSWER=""
+      fi
+      candidate="${ANSWER:-$HOST_PORT}"
+      if ! valid_port "$candidate"; then
+        echo "Please enter a port from 1 to 65535."
+        continue
+      fi
+      if [ "$candidate" != "$PREV_PORT" ] && port_in_use "$candidate"; then
+        echo "Port ${candidate} is already in use — please pick another."
+        continue
+      fi
       HOST_PORT="$candidate"
       break
-    fi
-    echo "Please enter a port from 1 to 65535." >/dev/tty
-  done
+    done
+  fi
 fi
 
 valid_port "$HOST_PORT" || die "ANON_CHAT_PORT must be a number from 1 to 65535 (got: '$HOST_PORT')."
@@ -210,9 +254,13 @@ fetch_source() {
   cd "$APP_DIR"
 }
 
-# --- Ask for data folder (only when running in an interactive terminal) ---
-if [ -t 0 ] && [ -z "${ANON_CHAT_DATA:-}" ]; then
-  read -rp "Data folder [Enter to keep $DATA_DIR]: " ans
+# --- Ask for data folder (only when we have a terminal to ask on) ---
+if [ -n "$ASK_TTY" ] && [ -z "${ANON_CHAT_DATA:-}" ]; then
+  if [ "$ASK_TTY" = "tty" ]; then
+    read -rp "Data folder [Enter to keep $DATA_DIR]: " ans </dev/tty || ans=""
+  else
+    read -rp "Data folder [Enter to keep $DATA_DIR]: " ans || ans=""
+  fi
   DATA_DIR="${ans:-$DATA_DIR}"
 fi
 
@@ -225,15 +273,8 @@ fetch_source
 # --- Make sure the public port is free (unless our own container holds it) ---
 if "$SUDO" docker ps -aq -f name=anon-chat 2>/dev/null | grep -q .; then
   echo "🔄 Existing anon-chat container found — it will be recreated with the new build."
-elif command -v ss >/dev/null 2>&1; then
-  if ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${HOST_PORT}$"; then
-    die "Port $HOST_PORT is already in use. Stop that service, or pick another port: ANON_CHAT_PORT=8080 curl -fsSL ... | bash"
-  fi
-else
-  if (exec 3<>"/dev/tcp/127.0.0.1/${HOST_PORT}") 2>/dev/null; then
-    exec 3>&- 3<&- || true
-    die "Port $HOST_PORT is already in use. Stop that service, or pick another port: ANON_CHAT_PORT=8080 curl -fsSL ... | bash"
-  fi
+elif port_in_use "$HOST_PORT"; then
+  die "Port $HOST_PORT is already in use. Stop that service, or pick another port: ANON_CHAT_PORT=8080 curl -fsSL ... | bash"
 fi
 
 # Make sure data folders exist

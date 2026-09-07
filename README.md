@@ -29,13 +29,14 @@ curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install
 
 The installer will:
 
-1. Ask which public port to use (press Enter for `3000`)
+1. Ask which public port to use (press Enter for `3000`; it re-asks if the port is taken)
 2. Install Docker if it's missing (Ubuntu/Debian, RHEL/Rocky/Alma, Fedora, Arch, Alpine)
 3. Clone this repo to `~/anon-chat` (or update an existing install)
 4. Build the image and start the `anon-chat` container with data in `~/anon-chat-data`
 5. Verify the app is answering, then print your URL (usually `http://YOUR_SERVER_IP:3000`)
 
-**Updating later?** Run the exact same command — it pulls the latest code and rebuilds.
+**Updating later?** Run the exact same command — it pulls the latest code and rebuilds,
+and keeps the port and data folder from your previous install (just press Enter).
 
 ### Options (environment variables)
 
@@ -50,7 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install
 | `ANON_CHAT_REPO_URL` | `https://github.com/sarakmacbook/anon-chat.git` | Git URL to install from |
 | `ANON_CHAT_DIR` | `~/anon-chat` | Where the app source is cloned |
 | `ANON_CHAT_DATA` | `~/anon-chat-data` | Where messages + uploads are stored (**back this up**) |
-| `ANON_CHAT_PORT` | prompted (`3000`) | Public TCP port; set this to skip the prompt |
+| `ANON_CHAT_PORT` | prompted (`3000`) | Public TCP port; set this to skip the prompt. On updates the prompt defaults to your previous port |
 | `PRIVATE_PASSWORD` | built-in password | Password for #Private — **set this before putting the server on the internet** |
 
 ## 🐳 Docker (manual)
