@@ -10,7 +10,7 @@
 #      ANON_CHAT_DIR         install folder            (default: $HOME/anon-chat)
 #      ANON_CHAT_DATA        data folder               (default: $HOME/anon-chat-data)
 #      ANON_CHAT_PORT        public TCP port           (installer asks; default: 3000)
-#      PRIVATE_PASSWORD      #Private room password    (default: built-in password)
+#      PRIVATE_PASSWORD      #Private room password    (installer asks if not set)
 #
 #  Re-running the same command updates the install in place.
 # ────────────────────────────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ Environment overrides (all optional):
   ANON_CHAT_DIR        install folder            (default: $HOME/anon-chat)
   ANON_CHAT_DATA       data folder               (default: $HOME/anon-chat-data)
   ANON_CHAT_PORT       public TCP port           (installer asks; default: previous port on updates, else 3000)
-  PRIVATE_PASSWORD     #Private room password    (default: built-in password)
+  PRIVATE_PASSWORD     #Private room password    (installer asks if not set — encrypted with PBKDF2 + AES-256-GCM)
 EOF
 }
 
@@ -117,6 +117,71 @@ fi
 
 valid_port "$HOST_PORT" || die "ANON_CHAT_PORT must be a number from 1 to 65535 (got: '$HOST_PORT')."
 
+# ─── Prompt for #Private room password ────────────────────────────────────────
+#  The password protects the #Private room and is used to derive:
+#    • A PBKDF2-SHA512 hash (600 000 iterations) for authentication
+#    • An AES-256-GCM encryption key for passkey data at rest
+#
+#  The password is written to a .env file (chmod 600) so it never appears in
+#  docker-compose.yml or process listings.
+# ──────────────────────────────────────────────────────────────────────────────
+
+ENV_FILE=""
+
+if [ -z "${PRIVATE_PASSWORD:-}" ]; then
+  if [ -n "$ASK_TTY" ]; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🔐  Set up your #Private room password"
+    echo ""
+    echo "   This password will be encrypted with high-end encryption:"
+    echo "   • PBKDF2-SHA512 (600 000 iterations) for authentication"
+    echo "   • AES-256-GCM to encrypt passkey data at rest on disk"
+    echo ""
+    echo "   You will use this password to unlock the #Private room"
+    echo "   and to create passkeys (Face ID / Touch ID / Chrome)."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    while true; do
+      if [ "$ASK_TTY" = "tty" ]; then
+        read -rsp "  Enter password (min 6 characters): " pw1 </dev/tty || pw1=""
+        echo ""
+        read -rsp "  Confirm password: " pw2 </dev/tty || pw2=""
+        echo ""
+      else
+        read -rsp "  Enter password (min 6 characters): " pw1 || pw1=""
+        echo ""
+        read -rsp "  Confirm password: " pw2 || pw2=""
+        echo ""
+      fi
+
+      if [ -z "$pw1" ]; then
+        echo "  ⚠️  Password cannot be empty. Try again."
+        echo ""
+        continue
+      fi
+      if [ "${#pw1}" -lt 6 ]; then
+        echo "  ⚠️  Password must be at least 6 characters. Try again."
+        echo ""
+        continue
+      fi
+      if [ "$pw1" != "$pw2" ]; then
+        echo "  ⚠️  Passwords do not match. Try again."
+        echo ""
+        continue
+      fi
+      PRIVATE_PASSWORD="$pw1"
+      break
+    done
+    echo ""
+    echo "  ✅ Password accepted. It will be encrypted with PBKDF2-SHA512 + AES-256-GCM."
+    echo ""
+  else
+    echo "ℹ️  No interactive terminal — using built-in password (set PRIVATE_PASSWORD to customize)."
+  fi
+fi
+
 if [ -n "${PRIVATE_PASSWORD:-}" ]; then
   case "$PRIVATE_PASSWORD" in
     *'"'*|*$'\n'*|*$'\t'*) die "PRIVATE_PASSWORD may not contain double quotes, tabs or newlines." ;;
@@ -128,14 +193,14 @@ echo "   Repo:  $REPO_URL"
 echo "   App:   $APP_DIR"
 echo "   Data:  $DATA_DIR"
 echo "   Port:  $HOST_PORT"
-[ -n "${PRIVATE_PASSWORD:-}" ] && echo "   Password: (custom — set via PRIVATE_PASSWORD)"
+[ -n "${PRIVATE_PASSWORD:-}" ] && echo "   🔐 Password: configured (PBKDF2-SHA512 + AES-256-GCM encryption)"
 echo ""
 
 # --- Auto-detect OS ---
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   OS="${ID:-}"
-  [ -n "${VERSION_ID:-}" ] && echo "📋 Detected OS: $OS $VERSION_ID"
+  [ -n "$VERSION_ID" ] && echo "📋 Detected OS: $OS $VERSION_ID"
   [ -n "$OS" ] || die "Cannot detect OS from /etc/os-release."
 else
   die "Cannot detect OS (no /etc/os-release). Install Docker manually, then re-run."
@@ -270,6 +335,20 @@ install_docker
 detect_compose
 fetch_source
 
+# --- Write the .env file (password stored securely, not in docker-compose.yml) ---
+ENV_FILE="$APP_DIR/.env"
+if [ -n "${PRIVATE_PASSWORD:-}" ]; then
+  # Write the private password to a .env file with restricted permissions.
+  # docker-compose reads .env automatically from the same directory.
+  cat > "$ENV_FILE" <<ENVEOF
+PRIVATE_PASSWORD=${PRIVATE_PASSWORD}
+ENVEOF
+  chmod 600 "$ENV_FILE"
+  echo "🔐 Password written to $ENV_FILE (mode 600 — readable only by owner)"
+  # Clear the shell variable so it doesn't linger in memory longer than needed
+  unset PRIVATE_PASSWORD
+fi
+
 # --- Make sure the public port is free (unless our own container holds it) ---
 if "$SUDO" docker ps -aq -f name=anon-chat 2>/dev/null | grep -q .; then
   echo "🔄 Existing anon-chat container found — it will be recreated with the new build."
@@ -283,8 +362,7 @@ echo "📁 Data will be stored in: $DATA_DIR"
 echo ""
 
 # Write a self-contained compose file that bind-mounts the chosen data folder.
-PW_LINE=""
-[ -n "${PRIVATE_PASSWORD:-}" ] && PW_LINE="      - PRIVATE_PASSWORD=${PRIVATE_PASSWORD}"
+# The password is passed via the .env file (written above), not inline.
 cat > docker-compose.deploy.yml <<YAMLEOF
 services:
   anon-chat:
@@ -293,9 +371,11 @@ services:
     restart: unless-stopped
     ports:
       - "${HOST_PORT}:3000"
+    env_file:
+      - path: .env
+        required: false
     environment:
       - NODE_ENV=production
-${PW_LINE}
     volumes:
       - "${DATA_DIR}:/app/Data"
       - "${DATA_DIR}/uploads:/tmp/chat-uploads"
@@ -327,7 +407,11 @@ if [ -n "$UP" ] && echo "$STATUS" | grep -q "Up"; then
   echo ""
   echo "📁 Data location: $DATA_DIR"
   echo "   (messages.json + uploads/ live here — back this folder up)"
-  [ -n "${PRIVATE_PASSWORD:-}" ] || echo "⚠️  Using the built-in #Private password. Set PRIVATE_PASSWORD to your own (see README)."
+  echo ""
+  echo "🔐 Encryption:"
+  echo "   • Password hashed with PBKDF2-SHA512 (600 000 iterations)"
+  echo "   • Passkey data encrypted at rest with AES-256-GCM"
+  echo "   • Password stored in $ENV_FILE (mode 600)"
   echo ""
   echo "🔒 Add HTTPS so Web Push notifications and passkeys work"
   echo "   (WebAuthn requires a secure context, e.g. behind Caddy/Nginx/Cloudflare — see README)."

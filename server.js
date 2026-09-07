@@ -13,6 +13,8 @@ const {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } = require("@simplewebauthn/server");
+const crypto = require("crypto");
+const cryptoVault = require("./crypto-vault");
 const passkeyStore = require("./passkey-store");
 
 const app = express();
@@ -21,16 +23,51 @@ const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 10 * 1024 * 1024 * 1024 });
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-const crypto = require("crypto");
-const sha256Hex = (s) => crypto.createHash("sha256").update(s).digest("hex");
+
+// ─── Password & encryption setup ─────────────────────────────────────────────
+//
+//  Password verification now uses PBKDF2-SHA512 (600 000 iterations) via
+//  crypto-vault.  A legacy sha256 hex hash is still accepted for backward
+//  compatibility so existing installs keep working.
+//
+//  When PRIVATE_PASSWORD is available we also derive an AES-256-GCM encryption
+//  key so passkey credentials are encrypted at rest on disk.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const BUILT_IN_PRIVATE_PASSWORD_HASH = "8d23cf6c86e834a7aa6eded54c26ce2bb2e74903538c61bdd5d2197997ab2f72";
-// #Private room password: PRIVATE_PASSWORD_HASH (sha256 hex) > PRIVATE_PASSWORD (plaintext) > built-in default.
-const PRIVATE_PASSWORD_HASH =
-  process.env.PRIVATE_PASSWORD_HASH ||
-  (process.env.PRIVATE_PASSWORD ? sha256Hex(process.env.PRIVATE_PASSWORD) : BUILT_IN_PRIVATE_PASSWORD_HASH);
-if (process.env.PRIVATE_PASSWORD_HASH) console.log("#Private password: using PRIVATE_PASSWORD_HASH");
-else if (process.env.PRIVATE_PASSWORD) console.log("#Private password: using PRIVATE_PASSWORD from environment");
-else console.log("#Private password: using built-in default (set PRIVATE_PASSWORD to change it — see README)");
+
+// Resolve the active password hash.
+//   PRIVATE_PASSWORD_HASH  →  explicit hash (PBKDF2 v1$… or legacy sha256 hex)
+//   PRIVATE_PASSWORD       →  derive a PBKDF2 hash at startup
+//   (neither)              →  built-in default (legacy sha256)
+let PRIVATE_PASSWORD_HASH;
+let PRIVATE_PASSWORD_PLAIN = null;
+
+if (process.env.PRIVATE_PASSWORD_HASH) {
+  PRIVATE_PASSWORD_HASH = process.env.PRIVATE_PASSWORD_HASH;
+  console.log("#Private password: using PRIVATE_PASSWORD_HASH");
+} else if (process.env.PRIVATE_PASSWORD) {
+  PRIVATE_PASSWORD_PLAIN = process.env.PRIVATE_PASSWORD;
+  // Hash the password with PBKDF2 for verification
+  PRIVATE_PASSWORD_HASH = cryptoVault.hashPassword(PRIVATE_PASSWORD_PLAIN);
+  console.log("#Private password: hashed with PBKDF2-SHA512 (600k iterations)");
+} else {
+  PRIVATE_PASSWORD_HASH = BUILT_IN_PRIVATE_PASSWORD_HASH;
+  console.log("#Private password: using built-in default (set PRIVATE_PASSWORD to change — see README)");
+}
+
+// ─── Passkey vault encryption (AES-256-GCM at rest) ──────────────────────────
+
+if (PRIVATE_PASSWORD_PLAIN) {
+  const encKey = cryptoVault.deriveEncryptionKey(PRIVATE_PASSWORD_PLAIN);
+  passkeyStore.setEncryptionKey(encKey);
+  console.log("🔐 Passkey vault: AES-256-GCM encryption enabled (PBKDF2-derived key)");
+} else {
+  console.log("⚠️  Passkey vault: encryption disabled (set PRIVATE_PASSWORD to enable AES-256-GCM at rest)");
+}
+
+// ─── Other constants ──────────────────────────────────────────────────────────
+
 const PASSKEY_RP_NAME = process.env.WEBAUTHN_RP_NAME || "Anon Chat";
 const PASSKEY_USER_ID = crypto.createHash("sha256").update("anon-chat-private-room").digest();
 const PASSKEY_USER_NAME = "private@anon-chat";
@@ -94,10 +131,21 @@ function saveMessages(r) {
   fs.writeFileSync(path.join(dir, "messages.json"), JSON.stringify(rooms[r].messages, null, 2));
 }
 
+/**
+ * Verify a password against the stored hash.
+ * Uses PBKDF2 (preferred) or sha256 (legacy) depending on the hash format.
+ * Always timing-safe.
+ */
 function privatePasswordMatches(password) {
-  const input = typeof password === "string" ? password : "";
-  const hashed = crypto.createHash("sha256").update(input).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(hashed), Buffer.from(PRIVATE_PASSWORD_HASH));
+  return cryptoVault.verifyPassword(password, PRIVATE_PASSWORD_HASH);
+}
+
+/**
+ * Compute a fingerprint of the active password hash so passkey records can be
+ * scoped to a specific password (changing the password invalidates old passkeys).
+ */
+function passwordFingerprint() {
+  return crypto.createHash("sha256").update(PRIVATE_PASSWORD_HASH).digest("hex");
 }
 
 function bytesToBase64URL(bytes) {
@@ -256,7 +304,8 @@ app.post("/passkey/register/options", async (req, res) => {
     }
 
     const context = webAuthnContextFromRequest(req);
-    const existingCredentials = passkeyStore.getAll().filter(credential => credential.rpID === context.rpID && credential.passwordHash === PRIVATE_PASSWORD_HASH);
+    const pwFingerprint = passwordFingerprint();
+    const existingCredentials = passkeyStore.getAll().filter(credential => credential.rpID === context.rpID && credential.passwordHash === pwFingerprint);
     const options = await generateRegistrationOptions({
       rpName: PASSKEY_RP_NAME,
       rpID: context.rpID,
@@ -306,6 +355,7 @@ app.post("/passkey/register/verify", async (req, res) => {
 
     const info = verification.registrationInfo;
     const registeredCredential = info.credential;
+    const pwFingerprint = passwordFingerprint();
     const record = passkeyStore.add({
       id: registeredCredential.id,
       publicKey: bytesToBase64URL(registeredCredential.publicKey),
@@ -313,7 +363,7 @@ app.post("/passkey/register/verify", async (req, res) => {
       transports: registeredCredential.transports || credential.response?.transports || [],
       rpID: challenge.rpID,
       origin: challenge.origin,
-      passwordHash: PRIVATE_PASSWORD_HASH,
+      passwordHash: pwFingerprint,
       label: safePasskeyLabel(label || challenge.label, "Private room passkey"),
       userVerified: info.userVerified,
       credentialDeviceType: info.credentialDeviceType,
@@ -331,7 +381,8 @@ app.post("/passkey/register/verify", async (req, res) => {
 app.post("/passkey/auth/options", async (req, res) => {
   try {
     const context = webAuthnContextFromRequest(req);
-    const credentials = passkeyStore.getAll().filter(credential => credential.rpID === context.rpID && credential.passwordHash === PRIVATE_PASSWORD_HASH);
+    const pwFingerprint = passwordFingerprint();
+    const credentials = passkeyStore.getAll().filter(credential => credential.rpID === context.rpID && credential.passwordHash === pwFingerprint);
     if (!credentials.length) {
       return res.status(404).json({ error: "No passkey is saved for this site yet. Enter the private password and tap Save Passkey first." });
     }
@@ -358,8 +409,9 @@ app.post("/passkey/auth/verify", async (req, res) => {
     if (!challenge) return res.status(400).json({ error: "Passkey unlock expired. Try again." });
     if (!credential || !credential.id) return res.status(400).json({ error: "Missing passkey response" });
 
+    const pwFingerprint = passwordFingerprint();
     const savedCredential = passkeyStore.get(credential.id);
-    if (!savedCredential || savedCredential.rpID !== challenge.rpID || savedCredential.passwordHash !== PRIVATE_PASSWORD_HASH) {
+    if (!savedCredential || savedCredential.rpID !== challenge.rpID || savedCredential.passwordHash !== pwFingerprint) {
       return res.status(404).json({ error: "This passkey is not registered for #Private on this site" });
     }
 

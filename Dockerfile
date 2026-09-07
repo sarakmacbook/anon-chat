@@ -6,6 +6,7 @@ COPY server.js .
 COPY upload-store.js .
 COPY push-store.js .
 COPY passkey-store.js .
+COPY crypto-vault.js .
 COPY public/ public/
 RUN mkdir -p /app/Data/public /app/Data/private
 EXPOSE 3000
