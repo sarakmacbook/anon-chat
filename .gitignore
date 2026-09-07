@@ -1,0 +1,5 @@
+node_modules/
+Data/
+.vapidkeys
+.passkey-secret
+npm-debug.log*

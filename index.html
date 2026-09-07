@@ -31,9 +31,18 @@ body { font-family: -apple-system, sans-serif; background: #0d0d0d; color: #fff;
 .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); justify-content: center; align-items: center; z-index: 100; }
 .modal.show { display: flex; }
 .modal img { max-width: 95%; max-height: 90%; border-radius: 8px; }
-.password-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: flex; justify-content: center; align-items: center; z-index: 200; }
-.password-modal input { padding: 12px; border-radius: 8px; border: none; font-size: 16px; margin-right: 8px; width: 200px; }
-.password-modal button { padding: 12px 20px; border: none; border-radius: 8px; background: #00d4aa; cursor: pointer; font-weight: bold; }
+.password-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: flex; justify-content: center; align-items: center; z-index: 200; padding: 16px; }
+.password-card { width: min(92vw, 390px); background: #1e1e1e; border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 18px; box-shadow: 0 12px 40px rgba(0,0,0,0.55); }
+.password-card .title { margin-bottom: 8px; font-weight: 700; }
+.password-row { display: flex; gap: 8px; align-items: center; }
+.password-modal input { flex: 1; min-width: 0; padding: 12px; border-radius: 8px; border: none; font-size: 16px; width: 100%; }
+.password-modal button { padding: 12px 16px; border: none; border-radius: 8px; background: #00d4aa; color: #000; cursor: pointer; font-weight: bold; white-space: nowrap; }
+.password-modal button:disabled { opacity: 0.55; cursor: not-allowed; }
+.passkey-status { min-height: 16px; margin: 8px 0 10px; color: #cfeee5; font-size: 12px; line-height: 1.35; }
+.passkey-actions { display: flex; gap: 8px; margin-top: 12px; }
+.passkey-actions button { flex: 1; background: #333; color: #fff; }
+.passkey-actions .primary { background: #00d4aa; color: #000; }
+.passkey-help { margin-top: 10px; color: #aaa; font-size: 12px; line-height: 1.35; }
 .hidden { display: none !important; }
 .push-banner { display: none; align-items: center; gap: 10px; padding: 10px 12px; background: #14342b; border-bottom: 1px solid #00d4aa; font-size: 14px; flex-shrink: 0; }
 .push-banner.show { display: flex; }
@@ -60,6 +69,7 @@ body { font-family: -apple-system, sans-serif; background: #0d0d0d; color: #fff;
   .msg { max-width: 90%; font-size: 14px; }
   .input-area { gap: 6px; }
   .send-btn, .file-btn { padding: 8px 12px; }
+  .password-row, .passkey-actions { flex-direction: column; align-items: stretch; }
 }
 </style>
 </head>
@@ -97,18 +107,28 @@ body { font-family: -apple-system, sans-serif; background: #0d0d0d; color: #fff;
 </div>
 
 <div class="password-modal hidden" id="passwordModal">
-  <div>
-    <p style="margin-bottom:12px">🔒 Enter private room password:</p>
-    <input type="password" id="passwordInput" placeholder="Password">
-    <button onclick="joinPrivate()">Join</button>
+  <div class="password-card">
+    <p class="title">🔒 Unlock #Private</p>
+    <div class="passkey-status" id="passkeyStatus">Use the room password, or unlock with a saved passkey.</div>
+    <div class="password-row">
+      <input type="password" id="passwordInput" placeholder="Private password" autocomplete="current-password">
+      <button onclick="joinPrivate()">Join</button>
+    </div>
+    <div class="passkey-actions">
+      <button type="button" class="primary" id="passkeyUnlockBtn">🔑 Unlock with Passkey</button>
+      <button type="button" id="passkeyRegisterBtn">➕ Save Passkey</button>
+    </div>
+    <p class="passkey-help">iPhone Face ID/Touch ID, iCloud Keychain, and Google Chrome passkeys are supported on HTTPS. First time: enter the password, then tap Save Passkey.</p>
   </div>
 </div>
 
 <div class="password-modal hidden" id="nameModal">
-  <div>
-    <p style="margin-bottom:12px">👤 Set your display name:</p>
-    <input type="text" id="nameInput" placeholder="Enter name..." maxlength="20">
-    <button onclick="setUserName()">Save</button>
+  <div class="password-card">
+    <p class="title">👤 Set your display name:</p>
+    <div class="password-row">
+      <input type="text" id="nameInput" placeholder="Enter name..." maxlength="20">
+      <button onclick="setUserName()">Save</button>
+    </div>
   </div>
 </div>
 
@@ -138,6 +158,11 @@ const fileInput = document.getElementById('fileInput');
 const onlineEl = document.getElementById('online');
 const passwordModal = document.getElementById('passwordModal');
 const passwordInput = document.getElementById('passwordInput');
+const passkeyStatus = document.getElementById('passkeyStatus');
+const passkeyUnlockBtn = document.getElementById('passkeyUnlockBtn');
+const passkeyRegisterBtn = document.getElementById('passkeyRegisterBtn');
+const PASSKEY_SAVED_KEY = 'anonchat-private-passkey-saved';
+let pendingPrivateUnlock = false;
 
 socket.on('welcome', (data) => {
   myUsername = data.username;
@@ -146,6 +171,7 @@ socket.on('welcome', (data) => {
 
 socket.on('room-joined', (data) => {
   currentRoom = data.room;
+  pendingPrivateUnlock = false;
   onlineEl.textContent = data.users + ' online';
   messagesEl.innerHTML = '';
   data.messages.forEach(m => renderMessage(m));
@@ -154,6 +180,13 @@ socket.on('room-joined', (data) => {
   document.querySelectorAll('.room-btn[data-room]').forEach(b => {
     b.classList.toggle('active', b.dataset.room === currentRoom);
   });
+
+  if (data.room === 'private') {
+    passwordModal.classList.add('hidden');
+    passwordInput.value = '';
+    if (data.authMethod === 'passkey') systemMsg('🔑 #Private unlocked with passkey');
+    maybeShowPushBanner();
+  }
 });
 
 socket.on('message', (msg) => {
@@ -172,6 +205,11 @@ socket.on('user-left', (data) => {
 });
 
 socket.on('error-msg', (data) => {
+  if (pendingPrivateUnlock) {
+    pendingPrivateUnlock = false;
+    showPrivateUnlockModal('⚠️ ' + (data.message || 'Could not unlock #Private'));
+    return;
+  }
   alert(data.message);
 });
 
@@ -234,13 +272,223 @@ function showImage(url) {
   document.getElementById('imageModal').classList.add('show');
 }
 
+// Passkey helpers for #Private unlock
+function passkeysAvailable() {
+  return !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+}
+
+function defaultPasskeyMessage() {
+  if (!window.PublicKeyCredential || !navigator.credentials) return '⚠️ This browser does not support passkeys.';
+  if (!window.isSecureContext) return '⚠️ Passkeys require HTTPS, or http://localhost for local testing.';
+  if (localStorage.getItem(PASSKEY_SAVED_KEY) === '1') return 'Use your saved passkey, or enter the room password.';
+  return 'Use the room password. To save a passkey, enter the password and tap Save Passkey.';
+}
+
+function updatePasskeyButtons() {
+  const available = passkeysAvailable();
+  passkeyUnlockBtn.disabled = !available;
+  passkeyRegisterBtn.disabled = !available;
+  return available;
+}
+
+function setPasskeyBusy(busy) {
+  if (busy) {
+    passkeyUnlockBtn.disabled = true;
+    passkeyRegisterBtn.disabled = true;
+  } else {
+    updatePasskeyButtons();
+  }
+}
+
+function showPrivateUnlockModal(message) {
+  updatePasskeyButtons();
+  passkeyStatus.textContent = message || defaultPasskeyMessage();
+  passwordModal.classList.remove('hidden');
+  setTimeout(() => passwordInput.focus(), 0);
+}
+
+function base64URLToBuffer(value) {
+  const base64 = String(value).replace(/-/g, '+').replace(/_/g, '/');
+  const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function bufferToBase64URL(buffer) {
+  const bytes = new Uint8Array(buffer || new ArrayBuffer(0));
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function creationOptionsFromJSON(options) {
+  return {
+    publicKey: {
+      ...options,
+      challenge: base64URLToBuffer(options.challenge),
+      user: { ...options.user, id: base64URLToBuffer(options.user.id) },
+      excludeCredentials: (options.excludeCredentials || []).map(credential => ({
+        ...credential,
+        id: base64URLToBuffer(credential.id),
+      })),
+    },
+  };
+}
+
+function requestOptionsFromJSON(options) {
+  return {
+    publicKey: {
+      ...options,
+      challenge: base64URLToBuffer(options.challenge),
+      allowCredentials: (options.allowCredentials || []).map(credential => ({
+        ...credential,
+        id: base64URLToBuffer(credential.id),
+      })),
+    },
+  };
+}
+
+function credentialToJSON(credential) {
+  if (typeof credential.toJSON === 'function') return credential.toJSON();
+
+  const response = credential.response;
+  const json = {
+    id: credential.id,
+    rawId: bufferToBase64URL(credential.rawId),
+    type: credential.type,
+    clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+  };
+  if (credential.authenticatorAttachment) json.authenticatorAttachment = credential.authenticatorAttachment;
+
+  if (response.attestationObject) {
+    const publicKey = response.getPublicKey ? response.getPublicKey() : null;
+    json.response = {
+      clientDataJSON: bufferToBase64URL(response.clientDataJSON),
+      attestationObject: bufferToBase64URL(response.attestationObject),
+      transports: response.getTransports ? response.getTransports() : [],
+    };
+    if (publicKey) json.response.publicKey = bufferToBase64URL(publicKey);
+    if (response.getPublicKeyAlgorithm) json.response.publicKeyAlgorithm = response.getPublicKeyAlgorithm();
+  } else {
+    json.response = {
+      clientDataJSON: bufferToBase64URL(response.clientDataJSON),
+      authenticatorData: bufferToBase64URL(response.authenticatorData),
+      signature: bufferToBase64URL(response.signature),
+    };
+    if (response.userHandle) json.response.userHandle = bufferToBase64URL(response.userHandle);
+  }
+
+  return json;
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  let data = {};
+  try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function passkeyLabel() {
+  const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || 'This device';
+  return platform + ' passkey';
+}
+
+function friendlyPasskeyError(err) {
+  if (err && err.name === 'NotAllowedError') return 'Passkey prompt was cancelled or timed out.';
+  if (err && err.name === 'SecurityError') return 'Passkeys only work on HTTPS for this site.';
+  return (err && err.message) || 'Passkey failed. Try again.';
+}
+
+async function registerPrivatePasskey() {
+  if (!passkeysAvailable()) {
+    passkeyStatus.textContent = defaultPasskeyMessage();
+    return;
+  }
+  const password = passwordInput.value;
+  if (!password) {
+    passkeyStatus.textContent = 'Enter the private room password first, then tap Save Passkey.';
+    passwordInput.focus();
+    return;
+  }
+
+  setPasskeyBusy(true);
+  passkeyStatus.textContent = 'Creating passkey setup challenge…';
+  const label = passkeyLabel();
+  try {
+    const { challengeId, options } = await postJSON('/passkey/register/options', { password, label });
+    passkeyStatus.textContent = 'Follow your browser prompt: Face ID, Touch ID, device PIN, or Chrome passkey.';
+    const credential = await navigator.credentials.create(creationOptionsFromJSON(options));
+    if (!credential) throw new Error('No passkey was created');
+
+    passkeyStatus.textContent = 'Verifying passkey…';
+    const result = await postJSON('/passkey/register/verify', {
+      challengeId,
+      credential: credentialToJSON(credential),
+      label,
+    });
+    localStorage.setItem(PASSKEY_SAVED_KEY, '1');
+    pendingPrivateUnlock = true;
+    passkeyStatus.textContent = '✅ Passkey saved. Unlocking #Private…';
+    socket.emit('join-room', { room: 'private', passkeyToken: result.token });
+  } catch (err) {
+    pendingPrivateUnlock = false;
+    passkeyStatus.textContent = '⚠️ ' + friendlyPasskeyError(err);
+  } finally {
+    setPasskeyBusy(false);
+  }
+}
+
+async function unlockPrivateWithPasskey() {
+  if (!passkeysAvailable()) {
+    passkeyStatus.textContent = defaultPasskeyMessage();
+    return;
+  }
+
+  setPasskeyBusy(true);
+  passkeyStatus.textContent = 'Looking for a saved passkey…';
+  try {
+    const { challengeId, options } = await postJSON('/passkey/auth/options');
+    passkeyStatus.textContent = 'Use Face ID, Touch ID, device unlock, or Google Chrome passkey.';
+    const credential = await navigator.credentials.get(requestOptionsFromJSON(options));
+    if (!credential) throw new Error('No passkey was selected');
+
+    passkeyStatus.textContent = 'Verifying passkey…';
+    const result = await postJSON('/passkey/auth/verify', {
+      challengeId,
+      credential: credentialToJSON(credential),
+    });
+    localStorage.setItem(PASSKEY_SAVED_KEY, '1');
+    pendingPrivateUnlock = true;
+    passkeyStatus.textContent = '✅ Passkey accepted. Unlocking #Private…';
+    socket.emit('join-room', { room: 'private', passkeyToken: result.token });
+  } catch (err) {
+    pendingPrivateUnlock = false;
+    passkeyStatus.textContent = '⚠️ ' + friendlyPasskeyError(err);
+  } finally {
+    setPasskeyBusy(false);
+  }
+}
+
+passkeyUnlockBtn.addEventListener('click', unlockPrivateWithPasskey);
+passkeyRegisterBtn.addEventListener('click', registerPrivatePasskey);
+updatePasskeyButtons();
+
 // Room switching
 document.querySelectorAll('.room-btn[data-room]').forEach(btn => {
   btn.addEventListener('click', () => {
     const room = btn.dataset.room;
     if (room === 'private' && currentRoom !== 'private') {
-      passwordModal.classList.remove('hidden');
-      passwordInput.focus();
+      showPrivateUnlockModal();
     } else {
       socket.emit('join-room', { room });
     }
@@ -249,10 +497,13 @@ document.querySelectorAll('.room-btn[data-room]').forEach(btn => {
 
 function joinPrivate() {
   const pw = passwordInput.value;
+  if (!pw) {
+    showPrivateUnlockModal('Enter the private room password, or unlock with a saved passkey.');
+    return;
+  }
+  pendingPrivateUnlock = true;
+  passkeyStatus.textContent = 'Checking password…';
   socket.emit('join-room', { room: 'private', password: pw });
-  passwordModal.classList.add('hidden');
-  passwordInput.value = '';
-  maybeShowPushBanner();
 }
 
 passwordInput.addEventListener('keypress', (e) => {
@@ -324,6 +575,7 @@ fileInput.addEventListener('change', () => {
   progressPercent.textContent = '0%';
   
   const formData = new FormData();
+  formData.append('room', currentRoom);
   formData.append('file', file, file.name);
   
   const xhr = new XMLHttpRequest();

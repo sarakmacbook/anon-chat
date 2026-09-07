@@ -287,7 +287,7 @@ if echo "$STATUS" | grep -q "Up"; then
   echo "✅ Anon Chat is running!"
   echo "🌐 http://$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}'):3000"
   echo ""
-  echo "🔒 Add HTTPS to make notifications work (Web Push requires a secure context)."
+  echo "🔒 Add HTTPS to make notifications and passkeys work (Web Push/WebAuthn require a secure context)."
   echo ""
   echo "📁 Data locations:"
   if [ "$DATA_CHOICE" = "2" ]; then

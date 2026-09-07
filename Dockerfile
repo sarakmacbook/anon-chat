@@ -5,6 +5,7 @@ RUN npm install --production
 COPY server.js .
 COPY upload-store.js .
 COPY push-store.js .
+COPY passkey-store.js .
 COPY public/ public/
 RUN mkdir -p /app/Data/public /app/Data/private
 EXPOSE 3000

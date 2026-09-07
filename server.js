@@ -7,14 +7,30 @@ const fs = require("fs");
 const { execSync } = require("child_process");
 const multer = require("multer");
 const webpush = require("web-push");
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require("@simplewebauthn/server");
+const passkeyStore = require("./passkey-store");
 
 const app = express();
+app.set("trust proxy", true);
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 10 * 1024 * 1024 * 1024 });
 
 const PORT = 3000;
 const crypto = require("crypto");
 const PRIVATE_PASSWORD_HASH = "8d23cf6c86e834a7aa6eded54c26ce2bb2e74903538c61bdd5d2197997ab2f72";
+const PASSKEY_RP_NAME = process.env.WEBAUTHN_RP_NAME || "Anon Chat";
+const PASSKEY_USER_ID = crypto.createHash("sha256").update("anon-chat-private-room").digest();
+const PASSKEY_USER_NAME = "private@anon-chat";
+const PASSKEY_USER_DISPLAY_NAME = "#Private room";
+const PASSKEY_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const PASSKEY_TOKEN_TTL_MS = 5 * 60 * 1000;
+const PASSKEY_TOKEN_SECRET = crypto.randomBytes(32);
+const PASSKEY_SUPPORTED_ALGS = [-7, -257]; // ES256 and RS256 are broadly supported by iPhone and Chrome passkeys.
 const MESSAGE_EXPIRY = null;
 const FILE_EXPIRY = 180 * 24 * 60 * 60 * 1000;
 const DATA_DIR = path.join(__dirname, "Data");
@@ -68,6 +84,99 @@ function loadMessages(r) {
 function saveMessages(r) {
   const dir = r === "private" ? DATA_PRIVATE : DATA_PUBLIC;
   fs.writeFileSync(path.join(dir, "messages.json"), JSON.stringify(rooms[r].messages, null, 2));
+}
+
+function privatePasswordMatches(password) {
+  const input = typeof password === "string" ? password : "";
+  const hashed = crypto.createHash("sha256").update(input).digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(hashed), Buffer.from(PRIVATE_PASSWORD_HASH));
+}
+
+function bytesToBase64URL(bytes) {
+  return Buffer.from(bytes).toString("base64url");
+}
+
+function base64URLToBytes(value) {
+  return new Uint8Array(Buffer.from(value, "base64url"));
+}
+
+function publicOriginFromRequest(req) {
+  if (req.headers.origin) return req.headers.origin;
+  const forwardedProto = (req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const forwardedHost = (req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const protocol = forwardedProto || req.protocol || "http";
+  const host = forwardedHost || req.headers.host;
+  return `${protocol}://${host}`;
+}
+
+function webAuthnContextFromRequest(req) {
+  const rawOrigin = process.env.WEBAUTHN_ORIGIN || publicOriginFromRequest(req);
+  const parsedOrigin = new URL(rawOrigin);
+  const origin = parsedOrigin.origin;
+  const hostname = parsedOrigin.hostname.toLowerCase();
+  const rpID = (process.env.WEBAUTHN_RP_ID || hostname).toLowerCase();
+  return { origin, rpID };
+}
+
+const passkeyChallenges = new Map();
+function savePasskeyChallenge(type, challenge, context, extra = {}) {
+  const challengeId = uuidv4();
+  passkeyChallenges.set(challengeId, {
+    type,
+    challenge,
+    origin: context.origin,
+    rpID: context.rpID,
+    expiresAt: Date.now() + PASSKEY_CHALLENGE_TTL_MS,
+    ...extra,
+  });
+  return challengeId;
+}
+function consumePasskeyChallenge(challengeId, type) {
+  const record = passkeyChallenges.get(challengeId);
+  passkeyChallenges.delete(challengeId);
+  if (!record || record.type !== type || record.expiresAt < Date.now()) return null;
+  return record;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, record] of passkeyChallenges) {
+    if (record.expiresAt < now) passkeyChallenges.delete(id);
+  }
+}, PASSKEY_CHALLENGE_TTL_MS).unref?.();
+
+function createPrivateAccessToken(authMethod, credentialId) {
+  const payload = {
+    room: "private",
+    method: authMethod,
+    credentialId,
+    exp: Date.now() + PASSKEY_TOKEN_TTL_MS,
+    nonce: uuidv4(),
+  };
+  const data = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto.createHmac("sha256", PASSKEY_TOKEN_SECRET).update(data).digest("base64url");
+  return `${data}.${sig}`;
+}
+
+function verifyPrivateAccessToken(token) {
+  if (!token || typeof token !== "string" || !token.includes(".")) return null;
+  const [data, sig] = token.split(".");
+  if (!data || !sig) return null;
+  const expected = crypto.createHmac("sha256", PASSKEY_TOKEN_SECRET).update(data).digest("base64url");
+  const sigBuffer = Buffer.from(sig);
+  const expectedBuffer = Buffer.from(expected);
+  if (sigBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(data, "base64url").toString("utf8"));
+    if (payload.room !== "private" || payload.exp < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function safePasskeyLabel(label, fallback = "Passkey") {
+  const trimmed = String(label || "").replace(/[\r\n\t]/g, " ").trim();
+  return (trimmed || fallback).substring(0, 80);
 }
 
 try {
@@ -129,6 +238,155 @@ function sendPushToAll(payload) {
     });
   });
 }
+
+// --- Passkeys (WebAuthn) for unlocking #Private ---
+app.post("/passkey/register/options", async (req, res) => {
+  try {
+    const { password, label } = req.body || {};
+    if (!privatePasswordMatches(password)) {
+      return res.status(401).json({ error: "Wrong private room password" });
+    }
+
+    const context = webAuthnContextFromRequest(req);
+    const existingCredentials = passkeyStore.getAll().filter(credential => credential.rpID === context.rpID && credential.passwordHash === PRIVATE_PASSWORD_HASH);
+    const options = await generateRegistrationOptions({
+      rpName: PASSKEY_RP_NAME,
+      rpID: context.rpID,
+      userID: PASSKEY_USER_ID,
+      userName: PASSKEY_USER_NAME,
+      userDisplayName: PASSKEY_USER_DISPLAY_NAME,
+      timeout: 60000,
+      attestationType: "none",
+      excludeCredentials: existingCredentials.map(credential => ({ id: credential.id })),
+      authenticatorSelection: {
+        residentKey: "required",
+        requireResidentKey: true,
+        userVerification: "required",
+      },
+      supportedAlgorithmIDs: PASSKEY_SUPPORTED_ALGS,
+    });
+
+    const challengeId = savePasskeyChallenge("registration", options.challenge, context, {
+      label: safePasskeyLabel(label, "Private room passkey"),
+    });
+    res.json({ challengeId, options });
+  } catch (err) {
+    console.error("Passkey registration options failed:", err);
+    res.status(500).json({ error: "Could not start passkey setup" });
+  }
+});
+
+app.post("/passkey/register/verify", async (req, res) => {
+  try {
+    const { challengeId, credential, label } = req.body || {};
+    const challenge = consumePasskeyChallenge(challengeId, "registration");
+    if (!challenge) return res.status(400).json({ error: "Passkey setup expired. Try again." });
+    if (!credential) return res.status(400).json({ error: "Missing passkey response" });
+
+    const verification = await verifyRegistrationResponse({
+      response: credential,
+      expectedChallenge: challenge.challenge,
+      expectedOrigin: challenge.origin,
+      expectedRPID: challenge.rpID,
+      requireUserVerification: true,
+      supportedAlgorithmIDs: PASSKEY_SUPPORTED_ALGS,
+    });
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(400).json({ error: "Passkey setup could not be verified" });
+    }
+
+    const info = verification.registrationInfo;
+    const registeredCredential = info.credential;
+    const record = passkeyStore.add({
+      id: registeredCredential.id,
+      publicKey: bytesToBase64URL(registeredCredential.publicKey),
+      counter: registeredCredential.counter,
+      transports: registeredCredential.transports || credential.response?.transports || [],
+      rpID: challenge.rpID,
+      origin: challenge.origin,
+      passwordHash: PRIVATE_PASSWORD_HASH,
+      label: safePasskeyLabel(label || challenge.label, "Private room passkey"),
+      userVerified: info.userVerified,
+      credentialDeviceType: info.credentialDeviceType,
+      credentialBackedUp: info.credentialBackedUp,
+    });
+
+    const token = createPrivateAccessToken("passkey", record.id);
+    res.json({ ok: true, token, credential: { id: record.id, label: record.label } });
+  } catch (err) {
+    console.error("Passkey registration verify failed:", err);
+    res.status(400).json({ error: err.message || "Passkey setup failed" });
+  }
+});
+
+app.post("/passkey/auth/options", async (req, res) => {
+  try {
+    const context = webAuthnContextFromRequest(req);
+    const credentials = passkeyStore.getAll().filter(credential => credential.rpID === context.rpID && credential.passwordHash === PRIVATE_PASSWORD_HASH);
+    if (!credentials.length) {
+      return res.status(404).json({ error: "No passkey is saved for this site yet. Enter the private password and tap Save Passkey first." });
+    }
+
+    const options = await generateAuthenticationOptions({
+      rpID: context.rpID,
+      allowCredentials: credentials.map(credential => ({ id: credential.id })),
+      timeout: 60000,
+      userVerification: "required",
+    });
+
+    const challengeId = savePasskeyChallenge("authentication", options.challenge, context);
+    res.json({ challengeId, options });
+  } catch (err) {
+    console.error("Passkey auth options failed:", err);
+    res.status(500).json({ error: "Could not start passkey unlock" });
+  }
+});
+
+app.post("/passkey/auth/verify", async (req, res) => {
+  try {
+    const { challengeId, credential } = req.body || {};
+    const challenge = consumePasskeyChallenge(challengeId, "authentication");
+    if (!challenge) return res.status(400).json({ error: "Passkey unlock expired. Try again." });
+    if (!credential || !credential.id) return res.status(400).json({ error: "Missing passkey response" });
+
+    const savedCredential = passkeyStore.get(credential.id);
+    if (!savedCredential || savedCredential.rpID !== challenge.rpID || savedCredential.passwordHash !== PRIVATE_PASSWORD_HASH) {
+      return res.status(404).json({ error: "This passkey is not registered for #Private on this site" });
+    }
+
+    const verification = await verifyAuthenticationResponse({
+      response: credential,
+      expectedChallenge: challenge.challenge,
+      expectedOrigin: challenge.origin,
+      expectedRPID: challenge.rpID,
+      credential: {
+        id: savedCredential.id,
+        publicKey: base64URLToBytes(savedCredential.publicKey),
+        counter: savedCredential.counter || 0,
+        transports: savedCredential.transports || [],
+      },
+      requireUserVerification: true,
+    });
+
+    if (!verification.verified) {
+      return res.status(401).json({ error: "Passkey unlock was not verified" });
+    }
+
+    passkeyStore.update(savedCredential.id, {
+      counter: verification.authenticationInfo.newCounter,
+      lastUsedAt: Date.now(),
+      credentialDeviceType: verification.authenticationInfo.credentialDeviceType,
+      credentialBackedUp: verification.authenticationInfo.credentialBackedUp,
+    });
+
+    const token = createPrivateAccessToken("passkey", savedCredential.id);
+    res.json({ ok: true, token });
+  } catch (err) {
+    console.error("Passkey auth verify failed:", err);
+    res.status(400).json({ error: err.message || "Passkey unlock failed" });
+  }
+});
 
 const sanitize = (name) => name.replace(/[^a-zA-Z0-9._-]/g, "_").substring(0, 100);
 const storage = multer.diskStorage({
@@ -197,25 +455,49 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("join-room", (data) => {
-    const { room, password } = data;
+  socket.on("join-room", (data = {}) => {
+    const { room, password, passkeyToken } = data || {};
+    if (!["public", "private"].includes(room)) {
+      socket.emit("error-msg", { message: "Unknown room" });
+      return;
+    }
+    let authMethod = room === "private" ? null : "open";
     if (room === "private") {
-      const hashed = crypto.createHash('sha256').update(password || '').digest('hex');
-      if (hashed !== PRIVATE_PASSWORD_HASH) {
-        socket.emit("error-msg", { message: "Wrong password" });
+      if (privatePasswordMatches(password)) {
+        authMethod = "password";
+      } else {
+        const tokenPayload = verifyPrivateAccessToken(passkeyToken);
+        if (tokenPayload && tokenPayload.method === "passkey") authMethod = "passkey";
+      }
+      if (!authMethod) {
+        socket.emit("error-msg", { message: passkeyToken ? "Passkey unlock expired. Try again." : "Wrong password" });
         return;
       }
     }
-    socket.rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
+    if (socket.rooms.has(room) && rooms[room]?.users.has(socket.id)) {
+      socket.emit("room-joined", { room, users: rooms[room].users.size, messages: rooms[room].messages.slice(-100), authMethod });
+      return;
+    }
+    Array.from(socket.rooms).forEach(r => {
+      if (r === socket.id) return;
+      socket.leave(r);
+      if (rooms[r]?.users.delete(socket.id)) {
+        socket.to(r).emit("user-left", { username, users: rooms[r].users.size });
+      }
+    });
     socket.join(room);
     if (!rooms[room]) rooms[room] = { messages: [], users: new Set() };
     rooms[room].users.add(socket.id);
-    socket.emit("room-joined", { room, users: rooms[room].users.size, messages: rooms[room].messages.slice(-100) });
+    socket.emit("room-joined", { room, users: rooms[room].users.size, messages: rooms[room].messages.slice(-100), authMethod });
     socket.to(room).emit("user-joined", { username, users: rooms[room].users.size });
   });
 
   socket.on("message", (data) => {
     const { room, text, file } = data;
+    if (!rooms[room] || !socket.rooms.has(room)) {
+      socket.emit("error-msg", { message: "Join the room before sending messages" });
+      return;
+    }
     const ip = socket.handshake.headers["x-forwarded-for"] || socket.handshake.address || "unknown";
     const now = Date.now();
     const sid = socket.id;
