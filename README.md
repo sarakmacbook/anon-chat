@@ -5,7 +5,7 @@ Anonymous real-time chat you can host yourself. No accounts, no sign-up, no data
 - **#Public** — open to anyone: random anonymous nicknames (CoolPanda42), live messages, file sharing, built-in rate limiting.
 - **#Private** — password-protected room. Unlock with a password **or a passkey** (iPhone Face ID / Touch ID, Windows Hello, Chrome passkeys), with **Web Push notifications** for every new message.
 
-Built with Node.js, Express and Socket.IO. Ships as a Docker image and a single-file installer.
+Built with Node.js, Express and Socket.IO. Ships as a Docker image, a single-file installer, and a complete uninstaller.
 
 ## ✨ Features
 
@@ -18,6 +18,7 @@ Built with Node.js, Express and Socket.IO. Ships as a Docker image and a single-
 - 👻 **Zero accounts** — random adjective + animal nicknames, changeable anytime, nothing tied to who you are
 - 🐘 **Zero database** — all state is plain JSON in one folder; backup = `cp -r`
 - 📱 **Mobile-first** — works great on phones; WebSocket chat with image lightbox
+- 🗑️ **Complete uninstall** — preview and remove the app, its Docker resources, and stored data with a confirmation prompt
 
 ## 🚀 One-click install (Linux)
 
@@ -162,6 +163,97 @@ curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install
 
 …or manually: `git pull` in `~/anon-chat`, then rebuild and restart the container.
 
+## 🗑️ Complete uninstall (Linux)
+
+> **This permanently deletes all chat history, uploaded files, server-side passkey records,
+> passwords/configuration, and the application source directory. Back up anything you want
+> to keep first.** Run as the same user who installed Anon Chat; the uninstaller uses `sudo`
+> only when needed, so you do not accidentally target root's home directory.
+
+Preview exactly what will be removed, then run the interactive uninstall:
+
+```bash
+bash ~/anon-chat/uninstall.sh --dry-run
+bash ~/anon-chat/uninstall.sh
+# Type uninstall at the confirmation prompt to proceed. Any other answer cancels.
+```
+
+For an older installation without `uninstall.sh`, fetch it directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/uninstall.sh | bash
+```
+
+The installer also exposes the same command, **without running any installation steps**:
+
+```bash
+bash install.sh --uninstall --dry-run
+# Or fetch the installer and select uninstall:
+curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install.sh | bash -s -- --uninstall
+```
+
+### What gets removed
+
+- This installation's Anon Chat containers, Compose-labelled app images, default network,
+  and managed data/upload volumes (including stopped containers and leftover volumes).
+- Bind-mounted data and uploads. Paths are discovered from the container, the new
+  `.anon-chat-install` record, or the older installer's `docker-compose.deploy.yml`.
+- The application directory, including `.env`, keys, local `Data/`, dependencies, and Git checkout.
+
+**Docker itself, system packages, unrelated containers/volumes, and shared Docker build caches
+are kept.** External/shared volumes are refused; Docker resources still in use by other
+containers are never force-removed. A cleanup failure stops the uninstall rather than
+silently deleting the source and reporting success. Home/system directories, symlinked
+removal paths, and containers belonging to another checkout are also refused.
+
+Manually configured reverse proxies, HTTPS certificates, DNS/tunnels, backups, browser
+site data/notification permissions, and device-saved passkeys must be removed separately.
+The server cannot erase data stored in visitors' browsers or password managers.
+
+### Uninstall options
+
+| Option / variable | Meaning |
+|---|---|
+| `--dry-run` | Inspect and print the removal plan without changing files or Docker resources |
+| `--yes` / `-y` | Confirm permanent deletion without a prompt; required when there is no terminal |
+| `--files-only` | Explicitly skip Docker cleanup, e.g. after Docker has already been removed; this is **not** a full Docker uninstall |
+| `ANON_CHAT_DIR` | App directory; defaults to `~/anon-chat`, just like the installer |
+| `ANON_CHAT_DATA` | Explicit data directory if deployment metadata is missing or cannot be read |
+| `ANON_CHAT_PROJECT` | Custom Compose project name if neither the container nor the install record is available |
+
+For a custom installation, specify the same application directory used at install time:
+
+```bash
+ANON_CHAT_DIR=/srv/anon-chat bash /srv/anon-chat/uninstall.sh --dry-run
+# If data cannot be discovered, explicitly supply its location too:
+ANON_CHAT_DIR=/srv/anon-chat ANON_CHAT_DATA=/srv/chat-data \
+  bash /srv/anon-chat/uninstall.sh --yes
+```
+
+The uninstaller supports both the one-click install and the stock manual Compose setup,
+without requiring the Compose plugin to still be installed. For edited Compose files with
+complex mounts, keep the container (it may be stopped) so its actual mount paths can be
+inspected. With no container, the fallback supports the shipped short-form volume syntax;
+it refuses ambiguous configuration rather than guessing a deletion path.
+
+For **local development without Docker**, stop `node server.js` first, then explicitly
+include the local server's temporary upload directory:
+
+```bash
+# From your local Anon Chat checkout; this deletes the checkout too.
+ANON_CHAT_DIR="$PWD" ANON_CHAT_DATA=/tmp/chat-uploads bash uninstall.sh --files-only
+```
+
+### Testing the uninstaller
+
+```bash
+npm test
+```
+
+Tests use disposable directories and a fake Docker CLI, never the real Docker daemon or
+this checkout. They cover removal, confirmation, dry runs, custom paths/projects, named
+volumes, installer dispatch, failure handling, and protection of unrelated files/resources.
+
 ## 🗂 Project structure
 
 | File | What it does |
@@ -173,7 +265,9 @@ curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install
 | `push-store.js` | JSON store for push subscriptions |
 | `upload-store.js` | JSON store for uploaded-file metadata |
 | `Dockerfile`, `docker-compose.yml` | Container build & run |
-| `install.sh` | The one-click installer (this README's hero) |
+| `install.sh` | The one-click installer; also accepts `--uninstall` |
+| `uninstall.sh` | Confirmed, scoped removal of Anon Chat and its stored data |
+| `tests/` | Isolated uninstaller tests with a fake Docker CLI |
 
 ## 📄 License
 
