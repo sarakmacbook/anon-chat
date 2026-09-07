@@ -13,6 +13,7 @@
 #      PRIVATE_PASSWORD      #Private room password    (installer asks if not set)
 #
 #  Re-running the same command updates the install in place.
+#  Complete uninstall: bash install.sh --uninstall (use --dry-run to preview).
 # ────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -26,6 +27,11 @@ One-click install (fetched from GitHub):
 Run a local copy:
   bash install.sh [--help]
 
+Complete uninstall (permanently deletes app data; asks for confirmation):
+  bash install.sh --uninstall [--dry-run] [--yes] [--files-only]
+  curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install.sh | bash -s -- --uninstall
+  Use --uninstall --help for details.
+
 Environment overrides (all optional):
   ANON_CHAT_REPO_URL   git URL to install from   (default: https://github.com/sarakmacbook/anon-chat.git)
   ANON_CHAT_DIR        install folder            (default: $HOME/anon-chat)
@@ -35,17 +41,46 @@ Environment overrides (all optional):
 EOF
 }
 
+die() { echo ""; echo "❌ $*"; exit 1; }
+
+# Dispatch before any install prompts, package changes, or source updates.
+# With curl | bash there is no local script path, so fetch the standalone tool.
+if [ "${1:-}" = "--uninstall" ]; then
+  shift
+  SCRIPT_DIR=""
+  if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+  fi
+  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
+    exec bash "$SCRIPT_DIR/uninstall.sh" "$@"
+  fi
+  UNINSTALL_SCRIPT="$(mktemp)"
+  trap 'rm -f -- "$UNINSTALL_SCRIPT"' EXIT
+  curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/uninstall.sh -o "$UNINSTALL_SCRIPT"
+  bash "$UNINSTALL_SCRIPT" "$@"
+  exit 0
+fi
+
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   usage
   exit 0
 fi
-
-die() { echo ""; echo "❌ $*"; exit 1; }
+[ "$#" -eq 0 ] || die "Unknown option: $1. Use --help for usage."
 
 REPO_URL="${ANON_CHAT_REPO_URL:-https://github.com/sarakmacbook/anon-chat.git}"
 APP_DIR="${ANON_CHAT_DIR:-$HOME/anon-chat}"
 DATA_DIR="${ANON_CHAT_DATA:-$HOME/anon-chat-data}"
 HOST_PORT="${ANON_CHAT_PORT:-3000}"
+
+# Keep a custom data directory on subsequent installs. Treat the install record
+# as plain text, never as shell code (it is also used by the uninstaller).
+if [ -z "${ANON_CHAT_DATA:-}" ] && [ -r "$APP_DIR/.anon-chat-install" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      data_dir=*) DATA_DIR="${line#data_dir=}" ;;
+    esac
+  done < "$APP_DIR/.anon-chat-install"
+fi
 
 valid_port() {
   case "$1" in
@@ -317,6 +352,7 @@ fetch_source() {
     git -C "$APP_DIR" pull --ff-only || true
   fi
   cd "$APP_DIR"
+  APP_DIR="$(pwd -P)"
 }
 
 # --- Ask for data folder (only when we have a terminal to ask on) ---
@@ -328,6 +364,14 @@ if [ -n "$ASK_TTY" ] && [ -z "${ANON_CHAT_DATA:-}" ]; then
   fi
   DATA_DIR="${ans:-$DATA_DIR}"
 fi
+
+# The deployment file and plain-text install record require single-line paths.
+case "$APP_DIR$DATA_DIR" in
+  *$'\n'*|*$'\r'*|*$'\t'*) die "Install and data paths may not contain newlines or tabs." ;;
+esac
+
+# Resolve a relative data path before fetch_source changes the working directory.
+case "$DATA_DIR" in /*) ;; *) DATA_DIR="$PWD/$DATA_DIR" ;; esac
 
 # --- Main ---
 install_deps
@@ -358,6 +402,10 @@ fi
 
 # Make sure data folders exist
 mkdir -p "$DATA_DIR/uploads"
+DATA_DIR="$(cd -- "$DATA_DIR" && pwd -P)"
+# Save this before building so even an interrupted installation can be removed.
+printf 'data_dir=%s\n' "$DATA_DIR" > "$APP_DIR/.anon-chat-install"
+chmod 600 "$APP_DIR/.anon-chat-install"
 echo "📁 Data will be stored in: $DATA_DIR"
 echo ""
 
@@ -385,6 +433,8 @@ echo "🏗️  Building image (this can take a minute on first run)..."
 "${COMPOSE[@]}" -f docker-compose.deploy.yml down --remove-orphans 2>/dev/null || true
 "${COMPOSE[@]}" -f docker-compose.deploy.yml build
 "${COMPOSE[@]}" -f docker-compose.deploy.yml up -d
+INSTALL_PROJECT="$($SUDO docker container inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' anon-chat)"
+printf 'project_name=%s\n' "$INSTALL_PROJECT" >> "$APP_DIR/.anon-chat-install"
 
 # --- Verify the app is actually answering ---
 echo "⏳ Waiting for Anon Chat to answer on port ${HOST_PORT}..."
@@ -417,6 +467,7 @@ if [ -n "$UP" ] && echo "$STATUS" | grep -q "Up"; then
   echo "   (WebAuthn requires a secure context, e.g. behind Caddy/Nginx/Cloudflare — see README)."
   echo ""
   echo "💡 Re-run the same command any time to update to the latest version."
+  printf '💡 Preview a complete uninstall: ANON_CHAT_DIR=%q bash %q --dry-run\n' "$APP_DIR" "$APP_DIR/uninstall.sh"
 else
   echo "❌ Failed to start. Logs:"
   $SUDO docker logs anon-chat 2>&1 | tail -20

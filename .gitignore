@@ -4,3 +4,5 @@ Data/
 .passkey-secret
 npm-debug.log*
 docker-compose.deploy.yml
+.anon-chat-install
+.env
