@@ -3,3 +3,4 @@ Data/
 .vapidkeys
 .passkey-secret
 npm-debug.log*
+docker-compose.deploy.yml

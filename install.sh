@@ -1,63 +1,73 @@
 #!/bin/bash
 set -e
+
+# ────────────────────────────────────────────────────────────────────────────
+#  Anon Chat — one-click installer (fetched & run straight from GitHub)
+#
+#  One-click install:
+#      curl -fsSL https://raw.githubusercontent.com/sarakmacbook/anon-chat/main/install.sh | bash
+#
+#  Optional environment overrides (no prompts needed):
+#      ANON_CHAT_REPO_URL   git URL to install from  (default: this GitHub repo)
+#      ANON_CHAT_DIR        install folder           (default: $HOME/anon-chat)
+#      ANON_CHAT_DATA       data folder              (default: $HOME/anon-chat-data)
+# ────────────────────────────────────────────────────────────────────────────
+
+REPO_URL="${ANON_CHAT_REPO_URL:-https://github.com/sarakmacbook/anon-chat.git}"
+APP_DIR="${ANON_CHAT_DIR:-$HOME/anon-chat}"
+DATA_DIR="${ANON_CHAT_DATA:-$HOME/anon-chat-data}"
+
 echo "🚀 Installing Anon Chat..."
+echo "   Repo: $REPO_URL"
+echo "   App:  $APP_DIR"
+echo "   Data: $DATA_DIR"
+echo ""
 
 # --- Auto-detect OS ---
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   OS=$ID
-  VER=$VERSION_ID
-  echo "📋 Detected: $OS $VER"
+  echo "📋 Detected OS: $OS $VERSION_ID"
 else
   echo "❌ Cannot detect OS. Manual install required."
   exit 1
 fi
 
-# --- Update packages ---
-echo "📦 Updating packages..."
+# --- Update package index ---
 case "$OS" in
-  ubuntu|debian)
-    apt-get update -qq
-    ;;
-  centos|rhel|rocky|alma|ol|amzn)
-    yum makecache -q
-    ;;
-  fedora)
-    dnf makecache -q
-    ;;
-  *)
-    echo "⚠️ Skipping package update for $OS"
-    ;;
+  ubuntu|debian)   apt-get update -qq ;;
+  centos|rhel|rocky|alma|ol|amzn) yum makecache -q ;;
+  fedora)          dnf makecache -q ;;
+  *) echo "⚠️ Skipping package update for $OS" ;;
 esac
-echo "✅ Packages updated"
 
-# --- Install prerequisites based on OS ---
+# --- Install prerequisites (curl, git, ca-certs, gnupg) ---
 install_deps() {
   case "$OS" in
     ubuntu|debian)
       apt-get update -qq
-      apt-get install -y ca-certificates curl gnupg lsb-release
+      apt-get install -y ca-certificates curl git gnupg lsb-release
       ;;
     centos|rhel|rocky|alma|ol|amzn)
-      yum install -y ca-certificates curl gnupg2
+      yum install -y ca-certificates curl git gnupg2
       ;;
     fedora)
-      dnf install -y ca-certificates curl gnupg2
+      dnf install -y ca-certificates curl git gnupg2
       ;;
     arch)
-      pacman -Sy --noconfirm ca-certificates curl gnupg
+      pacman -Sy --noconfirm ca-certificates curl git gnupg
       ;;
     alpine)
-      apk add --no-cache ca-certificates curl gnupg
+      apk add --no-cache ca-certificates curl git gnupg
       ;;
     *)
-      echo "⚠️ Unknown OS: $OS. Trying apt..."
-      apt-get update -qq && apt-get install -y ca-certificates curl gnupg
+      echo "⚠️ Unknown OS ($OS), trying apt..."
+      apt-get update -qq && apt-get install -y ca-certificates curl git gnupg
       ;;
   esac
 }
 
-# --- Install Docker ---
+# --- Install Docker (if missing) ---
 install_docker() {
   if command -v docker &> /dev/null; then
     echo "✅ Docker already installed: $(docker --version)"
@@ -68,9 +78,9 @@ install_docker() {
   case "$OS" in
     ubuntu|debian)
       install -m 0755 -d /etc/apt/keyrings
-      curl -fsSL https://download.docker.com/linux/$OS/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      curl -fsSL "https://download.docker.com/linux/$OS/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
       chmod a+r /etc/apt/keyrings/docker.gpg
-      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
       apt-get update -qq
       apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
       ;;
@@ -99,161 +109,57 @@ install_docker() {
       ;;
   esac
 
+  # Start Docker now (so it doesn't require a reboot)
   systemctl enable --now docker 2>/dev/null || true
+  service docker start 2>/dev/null || true
   echo "✅ Docker installed: $(docker --version)"
 }
 
-# --- Install docker-compose (v1 fallback) ---
-install_compose() {
-  if command -v docker-compose &> /dev/null; then
-    echo "✅ docker-compose installed: $(docker-compose --version)"
-    return
-  fi
-  if docker compose version &> /dev/null; then
-    echo "✅ docker compose plugin installed: $(docker compose version)"
-    return
-  fi
-
-  echo "📦 Installing docker-compose..."
-  case "$OS" in
-    ubuntu|debian)
-      apt-get install -y docker-compose 2>/dev/null || true
-      ;;
-    centos|rhel|rocky|alma|ol|amzn|fedora)
-      yum install -y docker-compose-plugin 2>/dev/null || true
-      ;;
-  esac
-
-  # Fallback: install via pip
-  if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
-    if command -v pip3 &> /dev/null; then
-      pip3 install docker-compose
-    elif command -v pip &> /dev/null; then
-      pip install docker-compose
-    else
-      # Download binary directly
-      COMPOSE_VER="1.29.2"
-      ARCH=$(uname -m)
-      case "$ARCH" in
-        x86_64) ARCH="x86_64" ;;
-        aarch64|arm64) ARCH="aarch64" ;;
-        *) echo "⚠️ Unsupported arch: $ARCH"; return ;;
-      esac
-      curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VER}/docker-compose-$(uname -s)-${ARCH}" -o /usr/local/bin/docker-compose
-      chmod +x /usr/local/bin/docker-compose
-      echo "✅ docker-compose binary installed"
-    fi
-  fi
-}
-
-# --- Detect compose command ---
+# --- Detect docker compose command (plugin v2 or legacy binary) ---
 detect_compose() {
-  if command -v docker-compose &> /dev/null; then
-    COMPOSE="docker-compose"
-  elif docker compose version &> /dev/null; then
-    COMPOSE="docker compose"
+  if docker compose version &> /dev/null; then
+    COMPOSE=(docker compose)
+  elif command -v docker-compose &> /dev/null; then
+    COMPOSE=(docker-compose)
   else
-    echo "❌ docker-compose not found. Install manually."
+    echo "❌ Docker Compose not found. Install manually then re-run."
     exit 1
   fi
-  echo "🔧 Using: $COMPOSE"
+  echo "🔧 Using: ${COMPOSE[*]}"
 }
+
+# --- Fetch / update the app source ---
+fetch_source() {
+  if [ ! -d "$APP_DIR/.git" ]; then
+    echo "📦 Cloning Anon Chat into $APP_DIR ..."
+    mkdir -p "$APP_DIR"
+    git clone --depth 1 "$REPO_URL" "$APP_DIR"
+  else
+    echo "🔄 Updating existing install in $APP_DIR ..."
+    git -C "$APP_DIR" pull --ff-only || true
+  fi
+  cd "$APP_DIR"
+}
+
+# --- Ask for data folder (only when running in an interactive terminal) ---
+if [ -t 0 ] && [ -z "$ANON_CHAT_DATA" ]; then
+  read -rp "Data folder [Enter to keep $DATA_DIR]: " ans
+  DATA_DIR="${ans:-$DATA_DIR}"
+fi
 
 # --- Main ---
 install_deps
 install_docker
-install_compose
+fetch_source
 detect_compose
 
-# --- Data location: default to Host folder (option 2) ---
-DATA_CHOICE=2
+# Make sure data folders exist
+mkdir -p "$DATA_DIR/uploads"
+echo "📁 Data will be stored in: $DATA_DIR"
+echo ""
 
-if [ "$DATA_CHOICE" = "2" ]; then
-  # Auto-detect available mounts — filter out tiny/temp mounts
-  echo ""
-  echo "📦 Available locations:"
-  echo "   0) Custom path (type your own)"
-  MOUNTS=()
-  # Get all mounts with >100MB free, skip virtual/temp filesystems
-  while IFS= read -r line; do
-    MOUNT=$(echo "$line" | awk '{print $1}')
-    SIZE=$(echo "$line" | awk '{print $2}')
-    AVAIL=$(echo "$line" | awk '{print $3}')
-    # Skip virtual filesystems and tiny mounts
-    case "$MOUNT" in /proc|/sys*|/dev*|/run*|/snap*|/boot/efi) continue ;; esac
-    MOUNTS+=("$MOUNT|$SIZE|$AVAIL")
-  done < <(df -h --output=target,size,avail | grep -E "^/" | awk 'NR>1')
-
-  # Also check common dirs
-  for dir in /home /opt /data /var /mnt; do
-    if [ -d "$dir" ]; then
-      AVAIL=$(df -h "$dir" | tail -1 | awk '{print $4}')
-      SIZE=$(df -h "$dir" | tail -1 | awk '{print $2}')
-      EXISTS=false
-      for m in "${MOUNTS[@]}"; do
-        [[ "$m" == "$dir|"* ]] && EXISTS=true
-      done
-      [ "$EXISTS" = false ] && MOUNTS+=("$dir|$SIZE|$AVAIL")
-    fi
-  done
-
-  i=1
-  for entry in "${MOUNTS[@]}"; do
-    MOUNT=$(echo "$entry" | cut -d'|' -f1)
-    SIZE=$(echo "$entry" | cut -d'|' -f2)
-    AVAIL=$(echo "$entry" | cut -d'|' -f3)
-    echo "   $i) $MOUNT  ($AVAIL free / $SIZE total)"
-    ((i++))
-  done
-  echo ""
-  read -p "Select mount [Enter=0 custom, 1-$((i-1))]: " MOUNT_CHOICE
-  MOUNT_CHOICE=${MOUNT_CHOICE:-0}
-
-  if [ "$MOUNT_CHOICE" = "0" ]; then
-    read -p "Enter public room path: " DATA_PUBLIC_PATH
-    read -p "Enter private room path: " DATA_PRIVATE_PATH
-  else
-    SELECTED_ENTRY="${MOUNTS[$((MOUNT_CHOICE-1))]}"
-    SELECTED_MOUNT=$(echo "$SELECTED_ENTRY" | cut -d'|' -f1)
-    # Drill down — show subfolders
-    CURRENT="$SELECTED_MOUNT"
-    while true; do
-      echo ""
-      echo "📂 Current: $CURRENT"
-      echo "   0) ✅ Use this folder"
-      echo "   1) ../  (go up)"
-      SUBS=()
-      i=2
-      for d in "$CURRENT"/*/; do
-        [ -d "$d" ] || continue
-        NAME=$(basename "$d")
-        [ "$NAME" = "proc" ] || [ "$NAME" = "sys" ] || [ "$NAME" = "dev" ] || [ "$NAME" = "run" ] && continue
-        SUBS+=("$d")
-        echo "   $i) $NAME/"
-        ((i++))
-      done
-      read -p "Select [0=use here, 1=up, 2-$((i-1))=subfolder]: " DIR_CHOICE
-      if [ "$DIR_CHOICE" = "0" ]; then
-        break
-      elif [ "$DIR_CHOICE" = "1" ]; then
-        CURRENT=$(dirname "$CURRENT")
-      elif [ "$DIR_CHOICE" -ge 2 ] 2>/dev/null && [ "$DIR_CHOICE" -le $((i-1)) ]; then
-        CURRENT="${SUBS[$((DIR_CHOICE-2))]}"
-      else
-        echo "Invalid choice"
-      fi
-    done
-    DATA_PUBLIC_PATH="${CURRENT%/}/anon-chat/public"
-    DATA_PRIVATE_PATH="${CURRENT%/}/anon-chat/private"
-  fi
-
-  mkdir -p "$DATA_PUBLIC_PATH" "$DATA_PRIVATE_PATH" "$DATA_PUBLIC_PATH/uploads" "$DATA_PRIVATE_PATH/uploads"
-  echo "📁 Public:  $DATA_PUBLIC_PATH"
-  echo "📁 Private: $DATA_PRIVATE_PATH"
-
-  # Rewrite docker-compose.yml cleanly
-  cat > docker-compose.yml << YAMLEOF
-version: "3"
+# Write a self-contained compose file that bind-mounts the chosen data folder.
+cat > docker-compose.deploy.yml << YAMLEOF
 services:
   anon-chat:
     build: .
@@ -261,44 +167,36 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    environment:
+      - NODE_ENV=production
     volumes:
-      - ${DATA_PUBLIC_PATH}:/app/Data/public
-      - ${DATA_PRIVATE_PATH}:/app/Data/private
-      - ${DATA_PUBLIC_PATH}/uploads:/tmp/chat-uploads/public
-      - ${DATA_PRIVATE_PATH}/uploads:/tmp/chat-uploads/private
+      - "${DATA_DIR}:/app/Data"
+      - "${DATA_DIR}/uploads:/tmp/chat-uploads"
 YAMLEOF
-  echo "✅ docker-compose.yml updated with bind mounts"
-else
-  echo "📁 Using Docker volume (default)"
-fi
 
-# --- Build and start ---
-cd "$(dirname "$0")"
-$COMPOSE down 2>/dev/null || true
-$COMPOSE build
-$COMPOSE up -d
+echo "🏗️  Building image (this can take a minute on first run)..."
+"${COMPOSE[@]}" -f docker-compose.deploy.yml down --remove-orphans 2>/dev/null || true
+"${COMPOSE[@]}" -f docker-compose.deploy.yml build
+"${COMPOSE[@]}" -f docker-compose.deploy.yml up -d
 
 # --- Verify ---
 sleep 5
 STATUS=$(docker ps --filter "name=anon-chat" --format "{{.Status}}")
 echo ""
 if echo "$STATUS" | grep -q "Up"; then
-  echo ""
+  PUBLIC_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
   echo "✅ Anon Chat is running!"
-  echo "🌐 http://$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}'):3000"
+  echo "🌐 http://${PUBLIC_IP:-localhost}:3000"
   echo ""
-  echo "🔒 Add HTTPS to make notifications and passkeys work (Web Push/WebAuthn require a secure context)."
+  echo "📁 Data location: $DATA_DIR"
+  echo "   (messages.json + uploads/ live here — back this folder up)"
   echo ""
-  echo "📁 Data locations:"
-  if [ "$DATA_CHOICE" = "2" ]; then
-    echo "   Public:  $DATA_PUBLIC_PATH/messages.json"
-    echo "   Private: $DATA_PRIVATE_PATH/messages.json"
-    echo "   Uploads: $DATA_PUBLIC_PATH/uploads/"
-  else
-    echo "   Chats:  /var/lib/docker/volumes/$(docker volume ls -q | grep chat-data)/_data/"
-    echo "   Uploads: /var/lib/docker/volumes/$(docker volume ls -q | grep chat-uploads)/_data/"
-  fi
+  echo "🔒 Add HTTPS so Web Push notifications and passkeys work"
+  echo "   (WebAuthn requires a secure context, e.g. behind Caddy/Nginx/Cloudflare)."
+  echo ""
+  echo "💡 Re-run the same command any time to update to the latest version."
 else
   echo "❌ Failed to start. Logs:"
-  docker logs anon-chat 2>&1 | tail -10
+  docker logs anon-chat 2>&1 | tail -20
+  exit 1
 fi
