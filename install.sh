@@ -9,7 +9,7 @@
 #      ANON_CHAT_REPO_URL    git URL to install from   (default: this GitHub repo)
 #      ANON_CHAT_DIR         install folder            (default: $HOME/anon-chat)
 #      ANON_CHAT_DATA        data folder               (default: $HOME/anon-chat-data)
-#      ANON_CHAT_PORT        public TCP port           (default: 3000)
+#      ANON_CHAT_PORT        public TCP port           (installer asks; default: 3000)
 #      PRIVATE_PASSWORD      #Private room password    (default: built-in password)
 #
 #  Re-running the same command updates the install in place.
@@ -30,7 +30,7 @@ Environment overrides (all optional):
   ANON_CHAT_REPO_URL   git URL to install from   (default: https://github.com/sarakmacbook/anon-chat.git)
   ANON_CHAT_DIR        install folder            (default: $HOME/anon-chat)
   ANON_CHAT_DATA       data folder               (default: $HOME/anon-chat-data)
-  ANON_CHAT_PORT       public TCP port           (default: 3000)
+  ANON_CHAT_PORT       public TCP port           (installer asks; default: 3000)
   PRIVATE_PASSWORD     #Private room password    (default: built-in password)
 EOF
 }
@@ -47,9 +47,31 @@ APP_DIR="${ANON_CHAT_DIR:-$HOME/anon-chat}"
 DATA_DIR="${ANON_CHAT_DATA:-$HOME/anon-chat-data}"
 HOST_PORT="${ANON_CHAT_PORT:-3000}"
 
-case "$HOST_PORT" in
-  ''|*[!0-9]*) die "ANON_CHAT_PORT must be a number (got: '$HOST_PORT')." ;;
-esac
+valid_port() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# Read from the controlling terminal so this also works with `curl ... | bash`.
+# ANON_CHAT_PORT remains available for unattended installations.
+if [ -z "${ANON_CHAT_PORT:-}" ] && [ -r /dev/tty ]; then
+  while true; do
+    if ! read -rp "Public port [${HOST_PORT}]: " answer </dev/tty; then
+      echo "⚠️  No interactive terminal available; using port ${HOST_PORT}."
+      break
+    fi
+    candidate="${answer:-$HOST_PORT}"
+    if valid_port "$candidate"; then
+      HOST_PORT="$candidate"
+      break
+    fi
+    echo "Please enter a port from 1 to 65535." >/dev/tty
+  done
+fi
+
+valid_port "$HOST_PORT" || die "ANON_CHAT_PORT must be a number from 1 to 65535 (got: '$HOST_PORT')."
 
 if [ -n "${PRIVATE_PASSWORD:-}" ]; then
   case "$PRIVATE_PASSWORD" in
