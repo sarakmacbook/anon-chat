@@ -20,9 +20,17 @@ app.set("trust proxy", true);
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 10 * 1024 * 1024 * 1024 });
 
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const crypto = require("crypto");
-const PRIVATE_PASSWORD_HASH = "8d23cf6c86e834a7aa6eded54c26ce2bb2e74903538c61bdd5d2197997ab2f72";
+const sha256Hex = (s) => crypto.createHash("sha256").update(s).digest("hex");
+const BUILT_IN_PRIVATE_PASSWORD_HASH = "8d23cf6c86e834a7aa6eded54c26ce2bb2e74903538c61bdd5d2197997ab2f72";
+// #Private room password: PRIVATE_PASSWORD_HASH (sha256 hex) > PRIVATE_PASSWORD (plaintext) > built-in default.
+const PRIVATE_PASSWORD_HASH =
+  process.env.PRIVATE_PASSWORD_HASH ||
+  (process.env.PRIVATE_PASSWORD ? sha256Hex(process.env.PRIVATE_PASSWORD) : BUILT_IN_PRIVATE_PASSWORD_HASH);
+if (process.env.PRIVATE_PASSWORD_HASH) console.log("#Private password: using PRIVATE_PASSWORD_HASH");
+else if (process.env.PRIVATE_PASSWORD) console.log("#Private password: using PRIVATE_PASSWORD from environment");
+else console.log("#Private password: using built-in default (set PRIVATE_PASSWORD to change it — see README)");
 const PASSKEY_RP_NAME = process.env.WEBAUTHN_RP_NAME || "Anon Chat";
 const PASSKEY_USER_ID = crypto.createHash("sha256").update("anon-chat-private-room").digest();
 const PASSKEY_USER_NAME = "private@anon-chat";
