@@ -32,7 +32,14 @@ const passkeyStore = require("./passkey-store");
 const app = express();
 app.set("trust proxy", true);
 const server = http.createServer(app);
-const io = new Server(server, { maxHttpBufferSize: 10 * 1024 * 1024 * 1024 });
+const io = new Server(server, {
+  maxHttpBufferSize: 10 * 1024 * 1024 * 1024,
+  // On Vercel every HTTP request can land on a different function instance, so
+  // Socket.IO's HTTP long-polling fallback (which needs sticky sessions) cannot
+  // work — only the WebSocket transport, which stays pinned to one instance.
+  // Self-hosted installs keep polling as a fallback for restrictive proxies.
+  transports: IS_VERCEL ? ["websocket"] : ["polling", "websocket"],
+});
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
@@ -268,8 +275,25 @@ try {
 } catch {}
 
 app.use(express.static(path.join(__dirname, "public")));
-app.use("/uploads/public", express.static(UPLOAD_PUBLIC));
-app.use("/uploads/private", express.static(UPLOAD_PRIVATE));
+
+// Uploaded files live outside the deployment bundle (UPLOAD_DIR, /tmp), and on
+// Vercel `express.static()` is ignored altogether — only the CDN serves static
+// assets there. Serve uploads from an explicit handler so downloads and inline
+// image previews work on every platform.
+function serveUploadDir(dir) {
+  return (req, res) => {
+    let name;
+    try { name = path.basename(decodeURIComponent(req.path)); } catch { return res.status(400).end(); }
+    if (!name || name === "." || name === "..") return res.status(404).json({ error: "Not found" });
+    const filePath = path.join(dir, name);
+    if (path.dirname(filePath) !== path.resolve(dir)) return res.status(404).json({ error: "Not found" });
+    res.sendFile(filePath, { headers: { "X-Content-Type-Options": "nosniff" } }, (err) => {
+      if (err && !res.headersSent) res.status(404).json({ error: "Not found" });
+    });
+  };
+}
+app.use("/uploads/public", serveUploadDir(UPLOAD_PUBLIC));
+app.use("/uploads/private", serveUploadDir(UPLOAD_PRIVATE));
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -280,17 +304,26 @@ app.use((req, res, next) => {
 
 // --- Web Push (VAPID) ---
 // Generate a valid keypair at runtime so web-push never crashes on bogus/missing hardcoded keys.
+// VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY take precedence: on Vercel the keyfile lives in the
+// instance-local /tmp, so without fixed keys every new instance invalidates existing push
+// subscriptions. Generate a pair with `npx web-push generate-vapid-keys`.
 let vapidKeys;
 const VAPID_KEYS_PATH = path.join(process.env.ANON_CHAT_DATA_DIR || __dirname, ".vapidkeys");
-try {
-  if (fs.existsSync(VAPID_KEYS_PATH)) {
-    vapidKeys = JSON.parse(fs.readFileSync(VAPID_KEYS_PATH, "utf8"));
-  } else {
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  vapidKeys = { publicKey: process.env.VAPID_PUBLIC_KEY, privateKey: process.env.VAPID_PRIVATE_KEY };
+  console.log("Web Push VAPID: using VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY");
+} else {
+  try {
+    if (fs.existsSync(VAPID_KEYS_PATH)) {
+      vapidKeys = JSON.parse(fs.readFileSync(VAPID_KEYS_PATH, "utf8"));
+    } else {
+      vapidKeys = webpush.generateVAPIDKeys();
+      fs.writeFileSync(VAPID_KEYS_PATH, JSON.stringify(vapidKeys));
+      if (IS_VERCEL) console.log("Web Push VAPID: generated ephemeral keys — set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY to keep subscriptions valid across instances");
+    }
+  } catch (e) {
     vapidKeys = webpush.generateVAPIDKeys();
-    fs.writeFileSync(VAPID_KEYS_PATH, JSON.stringify(vapidKeys));
   }
-} catch (e) {
-  vapidKeys = webpush.generateVAPIDKeys();
 }
 try {
   webpush.setVapidDetails("mailto:anon-chat@example.com", vapidKeys.publicKey, vapidKeys.privateKey);
@@ -653,6 +686,15 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log("Anon Chat on http://0.0.0.0:" + PORT);
-});
+// On Vercel the platform owns the listener: the module must export the HTTP
+// server (that is also how the WebSocket upgrade reaches Socket.IO). Everywhere
+// else — Docker, the installer, local dev — we listen ourselves.
+if (IS_VERCEL) {
+  console.log("Anon Chat running as a Vercel Function");
+} else {
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log("Anon Chat on http://0.0.0.0:" + PORT);
+  });
+}
+
+module.exports = server;

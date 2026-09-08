@@ -146,7 +146,11 @@ body { font-family: -apple-system, sans-serif; background: #0d0d0d; color: #fff;
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-const socket = io();
+// WebSocket first: on Vercel a WebSocket stays pinned to one function
+// instance, while Socket.IO's HTTP long-polling fallback would hit a different
+// instance on every request. Polling is still tried if the upgrade fails, so
+// self-hosted setups behind proxies that block WebSockets keep working.
+const socket = io({ transports: ['websocket', 'polling'], tryAllTransports: true });
 let currentRoom = 'public';
 let myUsername = '';
 let pendingFile = null;

@@ -5,7 +5,7 @@ Anonymous real-time chat you can host yourself. No accounts, no sign-up, no data
 - **#Public** — open to anyone: random anonymous nicknames (CoolPanda42), live messages, file sharing, built-in rate limiting.
 - **#Private** — password-protected room. Unlock with a password **or a passkey** (iPhone Face ID / Touch ID, Windows Hello, Chrome passkeys), with **Web Push notifications** for every new message.
 
-Built with Node.js, Express and Socket.IO. Ships as a Docker image, a single-file installer, a complete uninstaller, and a one-click Vercel deployment.
+Built with Node.js, Express and Socket.IO. Ships as a Docker image, a single-file installer, a complete uninstaller, and a one-click [Vercel deployment](#️-deploy-to-vercel).
 
 ## ✨ Features
 
@@ -74,37 +74,76 @@ volumes:
 
 ## ☁️ Deploy to Vercel
 
-Anon Chat also runs on [Vercel](https://vercel.com) — no Docker, no VPS. The whole
-app, Socket.IO server included, runs as a single long-running Vercel Function;
-`vercel.json` wires up the build, and the server detects Vercel at runtime to keep
-its writable state in the instance-local `/tmp` (the project directory there is
-read-only).
+Anon Chat also runs on [Vercel](https://vercel.com) — no Docker, no VPS, HTTPS
+included. The whole app, Socket.IO server and all, is deployed as a single
+Express-backed Vercel Function on [Fluid compute](https://vercel.com/docs/fluid-compute),
+which is what lets it hold WebSocket connections open. The UI in `public/` is
+served from Vercel's CDN, and the server detects Vercel at runtime (`VERCEL=1`)
+to keep its writable state in the instance-local `/tmp`, because the project
+directory there is read-only.
 
-### Deploy
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/sarakmacbook/anon-chat)
 
-1. Push this repo to GitHub (or any git host) and [import it in Vercel](https://vercel.com/new).
-   Framework preset: **Other** — `vercel.json` handles the rest.
-2. In *Project → Settings → Environment Variables* (recommended):
-   - `PRIVATE_PASSWORD` — your #Private room password
-   - `WEBAUTHN_RP_ID` — the host the site runs on, e.g. `chat.example.com`
-     (defaults to the request hostname; only needed if the two differ)
-   - `MAX_PRIVATE_UPLOAD_MB` — optional, #Private upload cap in MB (Vercel default: 4)
-3. Deploy — the Vercel URL is your chat.
+### Option A — install from the dashboard (no tooling)
 
-Or from the CLI:
+1. Click the **Deploy** button above, or [import the repo at vercel.com/new](https://vercel.com/new).
+2. Leave the build settings untouched. `vercel.json` pins `"framework": "express"`
+   and `"fluid": true`, so Vercel builds `server.js` into one function and serves
+   `public/` statically — no build command, no output directory to configure.
+3. Add your [environment variables](#environment-variables-on-vercel) (at minimum
+   `PRIVATE_PASSWORD`), then hit **Deploy**.
+4. Open the `*.vercel.app` URL — that is your chat.
+
+### Option B — install and deploy with the Vercel CLI
 
 ```bash
-npx vercel          # preview deployment
-npx vercel --prod   # production
+# 1. Install the CLI (Node.js 18+; Vercel CLI 47+ is required for Express apps)
+npm install -g vercel        # or: pnpm add -g vercel / brew install vercel-cli
+
+# 2. Get the code and its dependencies
+git clone https://github.com/sarakmacbook/anon-chat.git
+cd anon-chat
+npm install
+
+# 3. Log in and link the folder to a Vercel project (creates ./.vercel)
+vercel login
+vercel link
+
+# 4. Set your secrets (repeat per environment: production / preview / development)
+vercel env add PRIVATE_PASSWORD production
+
+# 5. Ship it
+vercel deploy            # preview URL
+vercel deploy --prod     # production URL
 ```
+
+Run `vercel dev` for a local Vercel-like server on <http://localhost:3000>, or
+`npm start` for plain Node.
+
+Later updates: `git push` to the connected branch (or re-run `vercel deploy --prod`).
+
+### Environment variables on Vercel
+
+Set these in *Project → Settings → Environment Variables* (or with `vercel env add`):
+
+| Variable | Needed? | Why |
+|---|---|---|
+| `PRIVATE_PASSWORD` | **Yes** | #Private room password. Without it the built-in default password is public knowledge, and passkeys are stored unencrypted |
+| `VAPID_PUBLIC_KEY` + `VAPID_PRIVATE_KEY` | Recommended | Stable Web Push keys. Without them keys are generated per instance in `/tmp`, so push subscriptions break whenever an instance is recycled. Generate a pair with `npx web-push generate-vapid-keys` |
+| `WEBAUTHN_RP_ID` | Only if needed | Host that passkeys are bound to, e.g. `chat.example.com`. Defaults to the request hostname — set it if you use a custom domain and want passkeys to survive a switch away from the `*.vercel.app` URL |
+| `MAX_PRIVATE_UPLOAD_MB` | Optional | #Private upload cap in MB (Vercel default: 4; Pro plans can raise it toward the 100 MB body limit) |
+
+Redeploy after changing environment variables — Vercel only applies them to new deployments.
 
 ### What works on Vercel
 
 - The full app: #Public and #Private, passkeys, Web Push, file uploads, rate limits.
-- Real-time chat over WebSockets — Vercel Functions support WebSocket connections
-  (Fluid Compute, enabled by default). A connection stays open until the function
-  hits its maximum duration: 300 s here (`maxDuration` in `vercel.json`), up to
-  800 s on Pro plans.
+- Real-time chat over WebSockets. [WebSocket support on Vercel Functions](https://vercel.com/docs/functions/websockets)
+  is in public beta and requires Fluid compute (default for projects created after
+  23 April 2025; `vercel.json` sets `"fluid": true` explicitly). The client connects
+  with the WebSocket transport first, since Socket.IO's HTTP long-polling fallback
+  needs sticky sessions that serverless instances cannot provide — the server only
+  accepts the WebSocket transport when it detects Vercel.
 - HTTPS by default, so passkeys and Web Push work out of the box.
 
 ### Vercel-specific limitations
@@ -116,15 +155,17 @@ Vercel is a serverless platform, so compared to self-hosting:
   the instance is warm but are **lost when the instance scales to zero** (after
   being idle) or is recycled — expect chat history to reset from time to time.
   For durable storage, self-host.
-- **Connections have a maximum lifetime.** A WebSocket closes when its function
-  reaches `maxDuration` (300 s by default). The client reconnects automatically;
-  anyone who was in #Private is asked to unlock again.
+- **Connections have a maximum lifetime.** A WebSocket closes when the function
+  reaches its max duration — 300 s on every plan by default (Pro/Enterprise can
+  raise it in *Project → Settings → Functions*). The client reconnects
+  automatically; anyone who was in #Private is asked to unlock again.
 - **Upload sizes are capped by the plan's request-body limit** — 4.5 MB on Hobby,
   100 MB on Pro — not by the app's 200 MB #Public limit.
 - **Cold starts.** The first request after the function sleeps pays a short startup cost.
-- **High concurrency.** New connections can land on different function instances,
-  which do not share in-memory state. It works well for a small community on one
-  warm instance; for a busy, heavily populated chat, self-host instead.
+- **High concurrency.** Rooms are kept in memory and a connection is pinned to the
+  instance that accepted it, so users on different instances would not see each
+  other's messages. It works well for a small community on one warm instance; for a
+  busy, heavily populated chat, self-host instead.
 
 ## 💻 Local development (no Docker)
 
@@ -186,6 +227,7 @@ Cloudflare Tunnel, Tailscale Funnel, or any other TLS proxy works too — as lon
 | `WEBAUTHN_ORIGIN` | auto-detected from the request | Public origin used to verify passkeys, e.g. `https://chat.example.com` |
 | `WEBAUTHN_RP_ID` | hostname | WebAuthn relying-party ID (usually your domain) |
 | `WEBAUTHN_RP_NAME` | `Anon Chat` | Name shown when saving passkeys |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | generated on first run | Web Push keypair. Set both to keep push subscriptions valid across restarts/instances (`npx web-push generate-vapid-keys`) |
 | `MAX_PRIVATE_UPLOAD_MB` | auto | #Private upload cap in MB (auto = free disk space self-hosted, 4 on Vercel) |
 | `ANON_CHAT_DATA_DIR` | `./Data` (`/tmp/anon-chat/data` on Vercel) | Where message history, passkeys, and metadata are stored |
 
@@ -315,8 +357,10 @@ volumes, installer dispatch, failure handling, and protection of unrelated files
 | File | What it does |
 |---|---|
 | `server.js` | Express + Socket.IO server: rooms, uploads, passkeys, Web Push |
-| `index.html` | The entire UI (vanilla JS, dark theme, mobile-first) |
-| `service-worker.js` | Web Push notification handler |
+| `public/index.html` | The entire UI (vanilla JS, dark theme, mobile-first) — served by Express locally, by the CDN on Vercel |
+| `public/service-worker.js` | Web Push notification handler |
+| `index.html`, `service-worker.js` | Root copies of the two files above, kept in sync |
+| `vercel.json`, `.vercelignore` | Vercel deployment config (Express framework preset, Fluid compute) |
 | `passkey-store.js` | JSON store for passkey public keys |
 | `push-store.js` | JSON store for push subscriptions |
 | `upload-store.js` | JSON store for uploaded-file metadata |
