@@ -14,6 +14,18 @@ const {
   verifyAuthenticationResponse,
 } = require("@simplewebauthn/server");
 const crypto = require("crypto");
+
+// ─── Vercel compatibility ────────────────────────────────────────────────────
+//
+//  On Vercel the project directory is read-only, so all writable state
+//  (message history, passkeys, upload/push metadata, .vapidkeys) is
+//  redirected to the instance-local /tmp filesystem.  Set ANON_CHAT_DATA_DIR
+//  explicitly to override.  This must run before the store modules load.
+// ────────────────────────────────────────────────────────────────────────────
+const IS_VERCEL = process.env.VERCEL === "1";
+if (IS_VERCEL && !process.env.ANON_CHAT_DATA_DIR) {
+  process.env.ANON_CHAT_DATA_DIR = "/tmp/anon-chat/data";
+}
 const cryptoVault = require("./crypto-vault");
 const passkeyStore = require("./passkey-store");
 
@@ -78,7 +90,7 @@ const PASSKEY_TOKEN_SECRET = crypto.randomBytes(32);
 const PASSKEY_SUPPORTED_ALGS = [-7, -257]; // ES256 and RS256 are broadly supported by iPhone and Chrome passkeys.
 const MESSAGE_EXPIRY = null;
 const FILE_EXPIRY = 180 * 24 * 60 * 60 * 1000;
-const DATA_DIR = path.join(__dirname, "Data");
+const DATA_DIR = process.env.ANON_CHAT_DATA_DIR || path.join(__dirname, "Data");
 const UPLOAD_DIR = "/tmp/chat-uploads";
 const UPLOAD_PUBLIC = path.join(UPLOAD_DIR, "public");
 const UPLOAD_PRIVATE = path.join(UPLOAD_DIR, "private");
@@ -97,13 +109,26 @@ function getAvailableGB() {
     return Math.floor(parseInt(parts[3]) / 1048576);
   } catch { return 10; }
 }
-let availableGB = getAvailableGB();
-let maxPrivateUploadMB = Math.max(1, (availableGB - 1) * 1024);
-console.log("Storage: " + availableGB + "GB available, private upload limit: " + Math.round(maxPrivateUploadMB / 1024) + "GB");
-setInterval(() => {
+const MAX_PRIVATE_UPLOAD_MB_ENV = process.env.MAX_PRIVATE_UPLOAD_MB ? parseInt(process.env.MAX_PRIVATE_UPLOAD_MB, 10) : null;
+let availableGB = 0;
+let maxPrivateUploadMB;
+if (IS_VERCEL) {
+  // /tmp on Vercel is a small tmpfs and df-based sizing is unreliable there,
+  // so use a fixed limit that fits under the Hobby plan's 4.5MB request-body
+  // ceiling by default (Pro allows up to 100MB — raise via MAX_PRIVATE_UPLOAD_MB).
+  maxPrivateUploadMB = MAX_PRIVATE_UPLOAD_MB_ENV || 4;
+  console.log("Storage (Vercel): private upload limit " + maxPrivateUploadMB + "MB (set MAX_PRIVATE_UPLOAD_MB to override)");
+} else {
   availableGB = getAvailableGB();
-  maxPrivateUploadMB = Math.max(1, (availableGB - 1) * 1024);
-}, 300000);
+  maxPrivateUploadMB = MAX_PRIVATE_UPLOAD_MB_ENV || Math.max(1, (availableGB - 1) * 1024);
+  console.log("Storage: " + availableGB + "GB available, private upload limit: " + Math.round(maxPrivateUploadMB / 1024) + "GB");
+  if (!MAX_PRIVATE_UPLOAD_MB_ENV) {
+    setInterval(() => {
+      availableGB = getAvailableGB();
+      maxPrivateUploadMB = Math.max(1, (availableGB - 1) * 1024);
+    }, 300000);
+  }
+}
 
 const RATE_LIMIT = {
   maxMessages: 10,
@@ -256,12 +281,13 @@ app.use((req, res, next) => {
 // --- Web Push (VAPID) ---
 // Generate a valid keypair at runtime so web-push never crashes on bogus/missing hardcoded keys.
 let vapidKeys;
+const VAPID_KEYS_PATH = path.join(process.env.ANON_CHAT_DATA_DIR || __dirname, ".vapidkeys");
 try {
-  if (fs.existsSync(path.join(__dirname, ".vapidkeys"))) {
-    vapidKeys = JSON.parse(fs.readFileSync(path.join(__dirname, ".vapidkeys"), "utf8"));
+  if (fs.existsSync(VAPID_KEYS_PATH)) {
+    vapidKeys = JSON.parse(fs.readFileSync(VAPID_KEYS_PATH, "utf8"));
   } else {
     vapidKeys = webpush.generateVAPIDKeys();
-    fs.writeFileSync(path.join(__dirname, ".vapidkeys"), JSON.stringify(vapidKeys));
+    fs.writeFileSync(VAPID_KEYS_PATH, JSON.stringify(vapidKeys));
   }
 } catch (e) {
   vapidKeys = webpush.generateVAPIDKeys();

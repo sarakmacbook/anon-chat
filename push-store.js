@@ -1,7 +1,7 @@
 // Push subscription store — subscriptions on disk, only metadata here
 const fs = require('fs');
 const path = require('path');
-const DATA_FILE = path.join(__dirname, 'Data', 'push-subscriptions.json');
+const DATA_FILE = path.join(process.env.ANON_CHAT_DATA_DIR || path.join(__dirname, 'Data'), 'push-subscriptions.json');
 
 function loadStore() {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }

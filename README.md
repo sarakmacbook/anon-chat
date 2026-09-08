@@ -5,7 +5,7 @@ Anonymous real-time chat you can host yourself. No accounts, no sign-up, no data
 - **#Public** — open to anyone: random anonymous nicknames (CoolPanda42), live messages, file sharing, built-in rate limiting.
 - **#Private** — password-protected room. Unlock with a password **or a passkey** (iPhone Face ID / Touch ID, Windows Hello, Chrome passkeys), with **Web Push notifications** for every new message.
 
-Built with Node.js, Express and Socket.IO. Ships as a Docker image, a single-file installer, and a complete uninstaller.
+Built with Node.js, Express and Socket.IO. Ships as a Docker image, a single-file installer, a complete uninstaller, and a one-click Vercel deployment.
 
 ## ✨ Features
 
@@ -72,6 +72,60 @@ volumes:
   - /path/to/anon-chat-data/uploads:/tmp/chat-uploads
 ```
 
+## ☁️ Deploy to Vercel
+
+Anon Chat also runs on [Vercel](https://vercel.com) — no Docker, no VPS. The whole
+app, Socket.IO server included, runs as a single long-running Vercel Function;
+`vercel.json` wires up the build, and the server detects Vercel at runtime to keep
+its writable state in the instance-local `/tmp` (the project directory there is
+read-only).
+
+### Deploy
+
+1. Push this repo to GitHub (or any git host) and [import it in Vercel](https://vercel.com/new).
+   Framework preset: **Other** — `vercel.json` handles the rest.
+2. In *Project → Settings → Environment Variables* (recommended):
+   - `PRIVATE_PASSWORD` — your #Private room password
+   - `WEBAUTHN_RP_ID` — the host the site runs on, e.g. `chat.example.com`
+     (defaults to the request hostname; only needed if the two differ)
+   - `MAX_PRIVATE_UPLOAD_MB` — optional, #Private upload cap in MB (Vercel default: 4)
+3. Deploy — the Vercel URL is your chat.
+
+Or from the CLI:
+
+```bash
+npx vercel          # preview deployment
+npx vercel --prod   # production
+```
+
+### What works on Vercel
+
+- The full app: #Public and #Private, passkeys, Web Push, file uploads, rate limits.
+- Real-time chat over WebSockets — Vercel Functions support WebSocket connections
+  (Fluid Compute, enabled by default). A connection stays open until the function
+  hits its maximum duration: 300 s here (`maxDuration` in `vercel.json`), up to
+  800 s on Pro plans.
+- HTTPS by default, so passkeys and Web Push work out of the box.
+
+### Vercel-specific limitations
+
+Vercel is a serverless platform, so compared to self-hosting:
+
+- **Storage is ephemeral.** Message history, uploads, passkeys, and push
+  subscriptions live in the function's instance-local `/tmp`. They persist while
+  the instance is warm but are **lost when the instance scales to zero** (after
+  being idle) or is recycled — expect chat history to reset from time to time.
+  For durable storage, self-host.
+- **Connections have a maximum lifetime.** A WebSocket closes when its function
+  reaches `maxDuration` (300 s by default). The client reconnects automatically;
+  anyone who was in #Private is asked to unlock again.
+- **Upload sizes are capped by the plan's request-body limit** — 4.5 MB on Hobby,
+  100 MB on Pro — not by the app's 200 MB #Public limit.
+- **Cold starts.** The first request after the function sleeps pays a short startup cost.
+- **High concurrency.** New connections can land on different function instances,
+  which do not share in-memory state. It works well for a small community on one
+  warm instance; for a busy, heavily populated chat, self-host instead.
+
 ## 💻 Local development (no Docker)
 
 ```bash
@@ -132,6 +186,8 @@ Cloudflare Tunnel, Tailscale Funnel, or any other TLS proxy works too — as lon
 | `WEBAUTHN_ORIGIN` | auto-detected from the request | Public origin used to verify passkeys, e.g. `https://chat.example.com` |
 | `WEBAUTHN_RP_ID` | hostname | WebAuthn relying-party ID (usually your domain) |
 | `WEBAUTHN_RP_NAME` | `Anon Chat` | Name shown when saving passkeys |
+| `MAX_PRIVATE_UPLOAD_MB` | auto | #Private upload cap in MB (auto = free disk space self-hosted, 4 on Vercel) |
+| `ANON_CHAT_DATA_DIR` | `./Data` (`/tmp/anon-chat/data` on Vercel) | Where message history, passkeys, and metadata are stored |
 
 ## 💾 Data & backups
 

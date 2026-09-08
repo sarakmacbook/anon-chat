@@ -164,13 +164,24 @@ const passkeyRegisterBtn = document.getElementById('passkeyRegisterBtn');
 const PASSKEY_SAVED_KEY = 'anonchat-private-passkey-saved';
 let pendingPrivateUnlock = false;
 
+// Connections can drop at any time (Vercel closes them when the function hits
+// its max duration). If we were in #Private when that happens, re-auth on reconnect.
+let hasConnectedBefore = false;
+let privateRoomWasActive = false;
+
 socket.on('welcome', (data) => {
   myUsername = data.username;
+  if (hasConnectedBefore && privateRoomWasActive) {
+    privateRoomWasActive = false;
+    showPrivateUnlockModal('Connection to #Private was interrupted. Unlock again to continue.');
+  }
+  hasConnectedBefore = true;
   socket.emit('join-room', { room: 'public' });
 });
 
 socket.on('room-joined', (data) => {
   currentRoom = data.room;
+  privateRoomWasActive = data.room === 'private';
   pendingPrivateUnlock = false;
   onlineEl.textContent = data.users + ' online';
   messagesEl.innerHTML = '';
