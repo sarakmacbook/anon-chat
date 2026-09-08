@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const vault = require('./crypto-vault');
 
-const DATA_DIR = path.join(__dirname, 'Data');
+const DATA_DIR = process.env.ANON_CHAT_DATA_DIR || path.join(__dirname, 'Data');
 const DATA_PRIVATE_DIR = path.join(DATA_DIR, 'private');
 const DATA_FILE = path.join(DATA_PRIVATE_DIR, 'passkeys.json');
 
