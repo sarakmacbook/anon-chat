@@ -1,0 +1,9 @@
+# Files that never need to reach the Vercel build/bundle.
+Data/
+tests/
+install.sh
+uninstall.sh
+Dockerfile
+docker-compose.yml
+docker-compose.deploy.yml
+.anon-chat-install
