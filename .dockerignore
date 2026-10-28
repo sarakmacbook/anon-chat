@@ -1,0 +1,9 @@
+.git
+.gitignore
+node_modules
+Data
+tests
+.vapidkeys
+*.log
+docker-compose.yml
+install.sh
