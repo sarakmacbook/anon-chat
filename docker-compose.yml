@@ -1,0 +1,16 @@
+services:
+  anon-chat:
+    build: .
+    container_name: anon-chat
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - chat-data:/app/Data
+      - chat-uploads:/tmp/chat-uploads
+    environment:
+      - NODE_ENV=production
+
+volumes:
+  chat-data:
+  chat-uploads:
