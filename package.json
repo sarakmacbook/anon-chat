@@ -1,19 +1,34 @@
 {
   "name": "anon-chat",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "Anonymous chat with an end-to-end encrypted private room and admin moderation",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "reset-admin": "node scripts/reset-admin.js"
   },
-  "keywords": [],
+  "keywords": [
+    "chat",
+    "socket.io",
+    "e2ee",
+    "argon2id",
+    "xchacha20-poly1305"
+  ],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "express": "^5.2.1",
     "multer": "^2.1.1",
     "socket.io": "^4.8.3",
     "uuid": "^13.0.0",
     "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.3",
+    "socket.io-client": "^4.8.4"
   }
 }

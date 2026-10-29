@@ -1,0 +1,10 @@
+# runtime data — chat history, credentials, keys, uploads
+Data/
+.vapidkeys
+
+# dependencies
+node_modules/
+
+# logs & editor noise
+*.log
+.DS_Store

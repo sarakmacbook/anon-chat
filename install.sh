@@ -210,8 +210,8 @@ if [ "$DATA_CHOICE" = "2" ]; then
   MOUNT_CHOICE=${MOUNT_CHOICE:-0}
 
   if [ "$MOUNT_CHOICE" = "0" ]; then
-    read -p "Enter public room path: " DATA_PUBLIC_PATH
-    read -p "Enter private room path: " DATA_PRIVATE_PATH
+    read -p "Enter a data folder (chats, keys and uploads are stored inside it): " DATA_ROOT
+    DATA_ROOT="${DATA_ROOT%/}/anon-chat"
   else
     SELECTED_ENTRY="${MOUNTS[$((MOUNT_CHOICE-1))]}"
     SELECTED_MOUNT=$(echo "$SELECTED_ENTRY" | cut -d'|' -f1)
@@ -243,13 +243,20 @@ if [ "$DATA_CHOICE" = "2" ]; then
         echo "Invalid choice"
       fi
     done
-    DATA_PUBLIC_PATH="${CURRENT%/}/anon-chat/public"
-    DATA_PRIVATE_PATH="${CURRENT%/}/anon-chat/private"
+    DATA_ROOT="${CURRENT%/}/anon-chat"
   fi
 
-  mkdir -p "$DATA_PUBLIC_PATH" "$DATA_PRIVATE_PATH" "$DATA_PUBLIC_PATH/uploads" "$DATA_PRIVATE_PATH/uploads"
-  echo "📁 Public:  $DATA_PUBLIC_PATH"
-  echo "📁 Private: $DATA_PRIVATE_PATH"
+  # One root for everything the container writes. Credentials live in
+  # data/private/security.json, so mounting only Data/public + Data/private
+  # (the old layout) would have thrown the admin account and the private room
+  # key away on every rebuild.
+  DATA_DIR_PATH="$DATA_ROOT/data"
+  UPLOAD_DIR_PATH="$DATA_ROOT/uploads"
+  DATA_PUBLIC_PATH="$DATA_DIR_PATH/public"
+  DATA_PRIVATE_PATH="$DATA_DIR_PATH/private"
+  mkdir -p "$DATA_PUBLIC_PATH" "$DATA_PRIVATE_PATH" "$UPLOAD_DIR_PATH/public" "$UPLOAD_DIR_PATH/private"
+  echo "📁 Data:    $DATA_DIR_PATH"
+  echo "📁 Uploads: $UPLOAD_DIR_PATH"
 
   # Rewrite docker-compose.yml cleanly
   cat > docker-compose.yml << YAMLEOF
@@ -262,10 +269,8 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ${DATA_PUBLIC_PATH}:/app/Data/public
-      - ${DATA_PRIVATE_PATH}:/app/Data/private
-      - ${DATA_PUBLIC_PATH}/uploads:/tmp/chat-uploads/public
-      - ${DATA_PRIVATE_PATH}/uploads:/tmp/chat-uploads/private
+      - ${DATA_DIR_PATH}:/app/Data
+      - ${UPLOAD_DIR_PATH}:/tmp/chat-uploads
 YAMLEOF
   echo "✅ docker-compose.yml updated with bind mounts"
 else
@@ -289,11 +294,19 @@ if echo "$STATUS" | grep -q "Up"; then
   echo ""
   echo "🔒 Add HTTPS to make notifications work (Web Push requires a secure context)."
   echo ""
+  echo "🛡️  First run: open that URL and the setup wizard asks you to create"
+  echo "   1) the admin account (can remove any message) and"
+  echo "   2) the #Private room passphrase (the encryption key — write it down!)."
+  echo ""
+  echo "🔑 Locked out of the admin account?"
+  echo "   docker exec -it anon-chat node scripts/reset-admin.js"
+  echo ""
   echo "📁 Data locations:"
   if [ "$DATA_CHOICE" = "2" ]; then
-    echo "   Public:  $DATA_PUBLIC_PATH/messages.json"
-    echo "   Private: $DATA_PRIVATE_PATH/messages.json"
-    echo "   Uploads: $DATA_PUBLIC_PATH/uploads/"
+    echo "   Public chat:   $DATA_PUBLIC_PATH/messages.json"
+    echo "   Private chat:  $DATA_PRIVATE_PATH/messages.json  (ciphertext only)"
+    echo "   Credentials:   $DATA_PRIVATE_PATH/security.json  (admin hash + room key verifier)"
+    echo "   Uploads:       $UPLOAD_DIR_PATH/public/ and $UPLOAD_DIR_PATH/private/"
   else
     echo "   Chats:  /var/lib/docker/volumes/$(docker volume ls -q | grep chat-data)/_data/"
     echo "   Uploads: /var/lib/docker/volumes/$(docker volume ls -q | grep chat-uploads)/_data/"

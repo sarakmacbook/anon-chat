@@ -1,7 +1,8 @@
 // Push subscription store — subscriptions on disk, only metadata here
 const fs = require('fs');
 const path = require('path');
-const DATA_FILE = path.join(__dirname, 'Data', 'push-subscriptions.json');
+const DATA_ROOT = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, 'Data');
+const DATA_FILE = path.join(DATA_ROOT, 'push-subscriptions.json');
 
 function loadStore() {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
@@ -9,7 +10,10 @@ function loadStore() {
 }
 
 function saveStore(store) {
-  try { fs.writeFileSync(DATA_FILE, JSON.stringify(store)); } catch {}
+  try {
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(store));
+  } catch {}
 }
 
 function add(sub) {
